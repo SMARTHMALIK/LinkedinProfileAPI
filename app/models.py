@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional
 
 
@@ -9,6 +9,13 @@ class ExperienceItem(BaseModel):
     startDate: Optional[str] = None
     endDate: Optional[str] = None
     isCurrent: bool = False
+
+    @field_validator("isCurrent", mode="before")
+    @classmethod
+    def coerce_is_current(cls, v):
+        if v is None:
+            return False
+        return v
     description: Optional[str] = None
 
 
