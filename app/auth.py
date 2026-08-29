@@ -39,30 +39,27 @@ class LinkedInSession:
 
         sess.cookies.set("li_at", li_at, domain=".linkedin.com", path="/")
 
-        # Warm-up: visit LinkedIn to let it set a fresh JSESSIONID.
-        # JSESSIONID in .env is a fallback for networks (e.g. corporate proxies)
-        # where the warm-up request is blocked; on a normal network, always
-        # let LinkedIn issue a fresh one so li_at and JSESSIONID are from the same session.
-        warmed = False
-        try:
-            resp = sess.get(
-                "https://www.linkedin.com/feed/",
-                allow_redirects=True,
-                timeout=10,
-            )
-            jsid = sess.cookies.get("JSESSIONID", "")
-            print(f"[DEBUG] Warm-up status: {resp.status_code}, JSESSIONID: {jsid!r}")
-            if jsid:
-                warmed = True
-        except requests.exceptions.TooManyRedirects:
-            print("[DEBUG] Warm-up redirect loop")
-        except Exception as exc:
-            print(f"[DEBUG] Warm-up error: {exc}")
-
-        # If warm-up could not get JSESSIONID, fall back to the value from .env
-        if not warmed and jsessionid:
+        # If JSESSIONID is provided in .env, use it directly and skip the /feed/
+        # warm-up request. Visiting /feed/ from a cloud IP (GCP/Render) with li_at
+        # can cause LinkedIn to rate-limit the IP, breaking unauthenticated public
+        # HTML fetches for subsequent requests.
+        if jsessionid:
             sess.cookies.set("JSESSIONID", jsessionid, domain=".linkedin.com", path="/")
-            print(f"[DEBUG] Fallback to JSESSIONID from .env: {jsessionid!r}")
+            print(f"[DEBUG] Using JSESSIONID from .env (skipping warm-up): {jsessionid!r}")
+        else:
+            # Local dev without JSESSIONID: do the warm-up to get a fresh one.
+            try:
+                resp = sess.get(
+                    "https://www.linkedin.com/feed/",
+                    allow_redirects=True,
+                    timeout=10,
+                )
+                jsid = sess.cookies.get("JSESSIONID", "")
+                print(f"[DEBUG] Warm-up status: {resp.status_code}, JSESSIONID: {jsid!r}")
+            except requests.exceptions.TooManyRedirects:
+                print("[DEBUG] Warm-up redirect loop")
+            except Exception as exc:
+                print(f"[DEBUG] Warm-up error: {exc}")
 
         self._session = sess
         return sess
