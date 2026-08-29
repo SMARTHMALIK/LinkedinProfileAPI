@@ -818,42 +818,22 @@ def fetch_all(url_or_id: str) -> dict:
     if api_ok:
         urn = html_data.get("urn", "")
 
-        # ── Typeahead: fallback for name/headline/picture when HTML blocked ────────
-        ta_data = _get_from_typeahead(public_id)
-        for k, v in ta_data.items():
-            if v and k not in html_data:
-                html_data[k] = v
-
-        # ── Classic Voyager REST (most stable, no decoration ID needed) ──────────
-        classic_profile = _get_classic_profile(public_id)
-        profile_view = _get_profile_view(public_id)
-
-        # ── GraphQL (if queryId is set) ─────────────────────────────────────────
-        if _discovered_graphql_query_id and not profile_view:
+        # ── GraphQL: URN confirmation + versionTag (2 calls total per request) ──
+        # Typeahead/search (404), classic REST (410), Dash (400) all consistently
+        # fail and make the session look like bot-probing — removed to keep the
+        # cookie alive across multiple requests.
+        if _discovered_graphql_query_id:
             dash_profile = _get_profile_via_graphql(public_id, urn=urn)
-
-        # ── Dash REST API fallback ───────────────────────────────────────────────
-        if not profile_view and not dash_profile:
-            dash_profile = _get_dash_profile_by_vanity(public_id)
-
-        if not profile_view and not dash_profile and urn:
-            dash_profile = _get_dash_profile_by_urn(urn, public_id)
-
-        if not profile_view and not dash_profile and urn:
-            dash_profile = _get_dash_profile_by_urn_path(urn, public_id)
     else:
         print("[DEBUG] Skipping authenticated API calls")
 
     print(f"[DEBUG] html_data keys: {list(html_data.keys())}")
-    if classic_profile:
-        print(f"[DEBUG] classic_profile keys: {list(classic_profile.keys())[:12]}")
-    if profile_view:
-        print(f"[DEBUG] profile_view keys: {list(profile_view.keys())[:12]}")
-    elif dash_profile:
+    if dash_profile:
         print(f"[DEBUG] dash_profile keys: {list(dash_profile.keys())}")
 
-    # If we have nothing at all, fail clearly
-    if not classic_profile and not profile_view and not dash_profile and not html_data.get("name") and not html_data.get("headline"):
+    # Succeed if we have at least a name, headline, or profile picture
+    has_data = any(html_data.get(k) for k in ("name", "headline", "profilePicture"))
+    if not has_data:
         raise LookupError(
             f"Profile '{public_id}' not found or is private. "
             "Make sure the profile is public."
@@ -862,8 +842,8 @@ def fetch_all(url_or_id: str) -> dict:
     return {
         "publicIdentifier": public_id,
         "htmlData": html_data,
-        "classicProfile": classic_profile or {},
-        "profileView": profile_view or {},
+        "classicProfile": {},
+        "profileView": {},
         "dashProfile": dash_profile or {},
         "skills": {},
         "languages": {},
