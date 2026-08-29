@@ -488,6 +488,18 @@ _discovered_graphql_query_id: str | None = os.getenv("LINKEDIN_GRAPHQL_QUERY_ID"
 # Components query returns actual profile sections (headline, experience, education, skills)
 _graphql_components_query_id: str | None = os.getenv("LINKEDIN_GRAPHQL_COMPONENTS_QUERY_ID") or None
 
+# /me data cached at startup — never re-fetched per-request to avoid cookie invalidation.
+_me_cache: dict | None = None
+
+
+def warm_me_cache() -> None:
+    """Call /me once at startup and cache the result. Never call per-request."""
+    global _me_cache
+    data = _check_api_connectivity()
+    if data:
+        _me_cache = data
+        print("[DEBUG] /me cache populated at startup.")
+
 
 def discover_decoration_from_bundles(html: str) -> str | None:
     """
@@ -794,42 +806,19 @@ def fetch_all(url_or_id: str) -> dict:
             html_data[k] = v
     print(f"[DEBUG] html_data after public fetch: {list(html_data.keys())}")
 
-    # ── Step 2: Skip authenticated HTML probe ────────────────────────────────
-    # Visiting linkedin.com/in/{id}/ with li_at from a cloud IP triggers LinkedIn's
-    # security system and invalidates the cookie after ~2 uses. JSESSIONID obtained
-    # at startup (feed warm-up) is sufficient for all Voyager API calls below.
-
-    # ── Step 3: Authenticated Voyager API calls ──────────────────────────────
-    me_data = _check_api_connectivity()
-    api_ok = me_data is not None
-    print(f"[DEBUG] API connectivity: {'OK' if api_ok else 'FAILED'}")
-
-    # If the li_at cookie belongs to the queried profile, /me has their full data
-    if me_data:
-        me_fields = _extract_from_me(me_data, public_id)
+    # ── Step 2: Use /me data from startup cache (never re-fetched per-request) ──
+    # Calling /me per-request from a cloud IP (GCP/Render) causes LinkedIn to
+    # detect the IP mismatch and invalidate the li_at cookie after ~2 uses.
+    # The cache is populated once at startup; all subsequent requests are cookie-free.
+    if _me_cache:
+        me_fields = _extract_from_me(_me_cache, public_id)
         for k, v in me_fields.items():
             if v and k not in html_data:
                 html_data[k] = v
 
-    classic_profile = None
-    profile_view = None
     dash_profile = None
 
-    if api_ok:
-        urn = html_data.get("urn", "")
-
-        # ── GraphQL: URN confirmation + versionTag (2 calls total per request) ──
-        # Typeahead/search (404), classic REST (410), Dash (400) all consistently
-        # fail and make the session look like bot-probing — removed to keep the
-        # cookie alive across multiple requests.
-        if _discovered_graphql_query_id:
-            dash_profile = _get_profile_via_graphql(public_id, urn=urn)
-    else:
-        print("[DEBUG] Skipping authenticated API calls")
-
     print(f"[DEBUG] html_data keys: {list(html_data.keys())}")
-    if dash_profile:
-        print(f"[DEBUG] dash_profile keys: {list(dash_profile.keys())}")
 
     # Succeed if we have at least a name, headline, or profile picture
     has_data = any(html_data.get(k) for k in ("name", "headline", "profilePicture"))

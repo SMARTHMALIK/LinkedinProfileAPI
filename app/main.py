@@ -17,8 +17,10 @@ async def lifespan(app: FastAPI):
     try:
         session.login()
         print("LinkedIn session established.")
+        # Call /me exactly once at startup and cache it.
+        # Never called per-request — avoids cookie invalidation from cloud IPs.
+        scraper.warm_me_cache()
     except Exception as exc:
-        # Don't crash the server — the session will retry on first request
         print(f"Warning: LinkedIn login failed at startup: {exc}")
     yield
 
