@@ -82,35 +82,48 @@ def _get_public_html(public_id: str) -> str:
     """
     Fetch the LinkedIn profile page WITHOUT authentication.
     LinkedIn renders full profile data server-side for unauthenticated requests
-    (SEO / Google indexing). This avoids queryId drift and cookie expiry issues.
+    (SEO / Google indexing). Uses curl_cffi to impersonate Chrome's TLS fingerprint
+    so LinkedIn's bot-detection does not return 999.
     """
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    url = f"https://www.linkedin.com/in/{public_id}/"
+    html = ""
+
+    # ── Attempt 1: curl_cffi with Chrome TLS fingerprint (bypasses 999) ─────
     try:
-        resp = _requests.get(
-            f"https://www.linkedin.com/in/{public_id}/",
-            headers=_PUBLIC_HEADERS,
-            verify=False,
-            timeout=15,
-            allow_redirects=True,
-        )
-        print(f"[DEBUG] Public HTML: status={resp.status_code}, length={len(resp.text)}")
-        if resp.status_code == 999:
-            print("[DEBUG] Public HTML blocked (999) — LinkedIn anti-bot. Falling back to auth-only.")
-            return ""
+        from curl_cffi import requests as _curl
+        resp = _curl.get(url, headers=_PUBLIC_HEADERS, impersonate="chrome110", timeout=15)
+        print(f"[DEBUG] Public HTML (curl_cffi): status={resp.status_code}, length={len(resp.text)}")
         if resp.status_code == 200:
             html = resp.text
-            # Quick sanity-check: does it have real profile data?
-            has_headline = bool(re.search(r'"headline"\s*:\s*"[^"]{3,}"', html))
-            has_ld = "<script type=\"application/ld+json\">" in html
-            print(f"[DEBUG] Public HTML — has headline JSON: {has_headline}, has JSON-LD: {has_ld}")
-            if has_headline or has_ld:
-                return html
-            print("[DEBUG] Public HTML returned but has no usable profile data (bot-wall?)")
-        return ""
+    except ImportError:
+        print("[DEBUG] curl_cffi not available — falling back to requests")
     except Exception as exc:
-        print(f"[DEBUG] Public HTML error: {exc}")
+        print(f"[DEBUG] curl_cffi error: {exc}")
+
+    # ── Attempt 2: plain requests fallback ───────────────────────────────────
+    if not html:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        try:
+            resp = _requests.get(url, headers=_PUBLIC_HEADERS, verify=False, timeout=15, allow_redirects=True)
+            print(f"[DEBUG] Public HTML (requests): status={resp.status_code}, length={len(resp.text)}")
+            if resp.status_code == 999:
+                print("[DEBUG] Public HTML blocked (999) — LinkedIn anti-bot.")
+            elif resp.status_code == 200:
+                html = resp.text
+        except Exception as exc:
+            print(f"[DEBUG] Public HTML requests error: {exc}")
+
+    if not html:
         return ""
+
+    has_headline = bool(re.search(r'"headline"\s*:\s*"[^"]{3,}"', html))
+    has_ld = "<script type=\"application/ld+json\">" in html
+    print(f"[DEBUG] Public HTML — has headline JSON: {has_headline}, has JSON-LD: {has_ld}")
+    if has_headline or has_ld:
+        return html
+    print("[DEBUG] Public HTML returned but has no usable profile data (bot-wall page?)")
+    return ""
 
 
 def _get_profile_html(public_id: str) -> str:
