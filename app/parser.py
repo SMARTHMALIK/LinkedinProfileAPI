@@ -141,29 +141,94 @@ def _parse_languages(languages_data: dict) -> list:
 
 # ---------- main entry point ----------
 
+def _parse_experience_from_json_ld(raw: list) -> list:
+    """Parse worksFor list from JSON-LD (company names only — partial data)."""
+    result = []
+    for org in raw:
+        if isinstance(org, dict) and org.get("name"):
+            result.append({
+                "title": None,
+                "company": org.get("name"),
+                "location": None,
+                "startDate": None,
+                "endDate": None,
+                "isCurrent": None,
+                "description": None,
+            })
+    return result
+
+
+def _parse_education_from_json_ld(raw: list) -> list:
+    """Parse alumniOf list from JSON-LD (school names only — partial data)."""
+    result = []
+    for school in raw:
+        if isinstance(school, dict) and school.get("name"):
+            result.append({
+                "school": school.get("name"),
+                "degree": None,
+                "fieldOfStudy": None,
+                "startDate": None,
+                "endDate": None,
+                "grade": None,
+                "description": None,
+            })
+    return result
+
+
 def build_response(raw: dict) -> dict:
     """
     Transform the dict returned by scraper.fetch_all() into our clean response schema.
-    Handles both legacy profileView format and the newer Dash API / HTML hybrid format.
+    Priority order for each field: classic Voyager REST > GraphQL/Dash > HTML data.
     Never raises — missing sections produce empty lists or None fields.
     """
     html_data = raw.get("htmlData", {})
+    classic = raw.get("classicProfile", {})
+    pv = raw.get("profileView", {})       # classic profileView (positionView, educationView, etc.)
     dash = raw.get("dashProfile", {})
 
-    # Dash API wraps data in 'elements' list
-    dash_elements = dash.get("elements", [])
-    dash_profile = dash_elements[0] if dash_elements else {}
+    # profileView wraps base profile under "profile" key; extract it
+    pv_base = pv.get("profile", {}) if pv else {}
 
-    base = _parse_base(dash_profile, html_data)
+    # GraphQL normalized JSON: extract Profile entity from 'included' list
+    if "included" in dash:
+        profile_entity = next(
+            (o for o in dash.get("included", []) if o.get("$type", "").endswith(".Profile")),
+            None,
+        )
+        dash_profile = profile_entity or {}
+    else:
+        dash_elements = dash.get("elements", [])
+        dash_profile = dash_elements[0] if dash_elements else {}
+
+    # For base fields (headline, location, about): classic profile > profileView base > dash > html
+    base_source = classic or pv_base or dash_profile
+    base = _parse_base(base_source, html_data)
+
+    # For sections: profileView has positionView/educationView/skillView/etc.
+    sections_source = pv if pv else dash_profile
+
+    # Experience: profileView > Dash > JSON-LD stub
+    experience = _parse_experience(sections_source)
+    if not experience:
+        experience = _parse_experience_from_json_ld(html_data.get("experience_raw", []))
+
+    # Education: profileView > Dash > JSON-LD stub
+    education = _parse_education(sections_source)
+    if not education:
+        education = _parse_education_from_json_ld(html_data.get("education_raw", []))
+
+    # Skills and languages live inside profileView as skillView/languageView
+    skills_src = pv.get("skillView", raw.get("skills", {})) if pv else raw.get("skills", {})
+    lang_src = pv.get("languageView", raw.get("languages", {})) if pv else raw.get("languages", {})
 
     return {
         "publicIdentifier": raw.get("publicIdentifier"),
         **base,
-        "experience": _parse_experience(dash_profile),
-        "education": _parse_education(dash_profile),
-        "certifications": _parse_certifications(dash_profile),
-        "skills": _parse_skills(raw.get("skills", {})),
-        "languages": _parse_languages(raw.get("languages", {})),
+        "experience": experience,
+        "education": education,
+        "certifications": _parse_certifications(sections_source),
+        "skills": _parse_skills(skills_src),
+        "languages": _parse_languages(lang_src),
     }
 
 
@@ -174,16 +239,23 @@ def _parse_base(profile: dict, html_data: dict = None) -> dict:
     name = f"{first} {last}".strip() or html_data.get("name")
     return {
         "name": name,
-        "headline": profile.get("headline"),
-        "location": profile.get("locationName") or profile.get("geoLocationName"),
-        "about": profile.get("summary"),
+        "headline": profile.get("headline") or html_data.get("headline"),
+        "location": (
+            profile.get("locationName")
+            or profile.get("geoLocationName")
+            or html_data.get("location")
+        ),
+        "about": profile.get("summary") or html_data.get("about"),
         "connections": profile.get("connectionsCount"),
         "followers": profile.get("followersCount"),
         "profilePicture": (
             _best_image_url(profile.get("profilePicture"))
             or html_data.get("profilePicture")
         ),
-        "backgroundImage": _best_image_url(
-            profile.get("backgroundImage") or profile.get("backgroundPicture")
+        "backgroundImage": (
+            _best_image_url(
+                profile.get("backgroundImage") or profile.get("backgroundPicture")
+            )
+            or html_data.get("backgroundImage")
         ),
     }

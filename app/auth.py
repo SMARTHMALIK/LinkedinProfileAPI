@@ -37,26 +37,32 @@ class LinkedInSession:
         sess.verify = False
         sess.max_redirects = 5
 
-        sess.cookies.set("li_at", li_at, domain=".linkedin.com")
-        if jsessionid:
-            sess.cookies.set("JSESSIONID", jsessionid, domain=".linkedin.com")
-            print(f"[DEBUG] Using JSESSIONID from .env: {jsessionid!r}")
-        else:
-            # Try a lightweight warm-up to get JSESSIONID set by LinkedIn.
-            # This may fail on corporate proxy networks — a TooManyRedirects
-            # exception here is expected and handled gracefully.
-            try:
-                resp = sess.get(
-                    "https://www.linkedin.com/",
-                    allow_redirects=True,
-                    timeout=10,
-                )
-                jsid = sess.cookies.get("JSESSIONID", "")
-                print(f"[DEBUG] Warm-up status: {resp.status_code}, JSESSIONID: {jsid!r}")
-            except requests.exceptions.TooManyRedirects:
-                print("[DEBUG] Warm-up redirect loop — set LINKEDIN_JSESSIONID in .env to fix this")
-            except Exception as exc:
-                print(f"[DEBUG] Warm-up error: {exc}")
+        sess.cookies.set("li_at", li_at, domain=".linkedin.com", path="/")
+
+        # Warm-up: visit LinkedIn to let it set a fresh JSESSIONID.
+        # JSESSIONID in .env is a fallback for networks (e.g. corporate proxies)
+        # where the warm-up request is blocked; on a normal network, always
+        # let LinkedIn issue a fresh one so li_at and JSESSIONID are from the same session.
+        warmed = False
+        try:
+            resp = sess.get(
+                "https://www.linkedin.com/feed/",
+                allow_redirects=True,
+                timeout=10,
+            )
+            jsid = sess.cookies.get("JSESSIONID", "")
+            print(f"[DEBUG] Warm-up status: {resp.status_code}, JSESSIONID: {jsid!r}")
+            if jsid:
+                warmed = True
+        except requests.exceptions.TooManyRedirects:
+            print("[DEBUG] Warm-up redirect loop")
+        except Exception as exc:
+            print(f"[DEBUG] Warm-up error: {exc}")
+
+        # If warm-up could not get JSESSIONID, fall back to the value from .env
+        if not warmed and jsessionid:
+            sess.cookies.set("JSESSIONID", jsessionid, domain=".linkedin.com", path="/")
+            print(f"[DEBUG] Fallback to JSESSIONID from .env: {jsessionid!r}")
 
         self._session = sess
         return sess
@@ -77,9 +83,10 @@ class LinkedInSession:
             "csrf-token": csrf,
             "x-restli-protocol-version": "2.0.0",
             "x-li-lang": "en_US",
-            "x-li-track": '{"clientVersion":"1.13.1665"}',
+            "x-li-track": '{"clientVersion":"1.13.1665","osName":"web","timezoneOffset":5.5,"timezone":"Asia/Kolkata","deviceFormFactor":"DESKTOP","mpName":"voyager-web","displayDensity":1,"displayWidth":1920,"displayHeight":1080}',
             "Accept": "application/vnd.linkedin.normalized+json+2.1",
             "Origin": "https://www.linkedin.com",
+            "x-li-page-instance": "urn:li:page:d_flagship3_profile_view_base;AAAAAAAAAA==",
         }
 
 
