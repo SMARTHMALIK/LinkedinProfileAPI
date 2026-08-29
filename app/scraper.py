@@ -759,25 +759,13 @@ def fetch_all(url_or_id: str) -> dict:
             html_data[k] = v
     print(f"[DEBUG] html_data after public fetch: {list(html_data.keys())}")
 
-    # ── Step 2: Authenticated HTML visit (side effect: gets JSESSIONID) ────────
-    _cookie_valid = True
-    try:
-        auth_html = _get_profile_html(public_id)
-        if auth_html:
-            auth_data = _extract_from_html(auth_html)
-            for k, v in auth_data.items():
-                if v and k not in html_data:
-                    html_data[k] = v
-            if not (_discovered_decoration and _discovered_graphql_query_id):
-                discovered = discover_decoration_from_bundles(auth_html)
-                if discovered and discovered not in _DECORATION_IDS:
-                    _DECORATION_IDS.insert(0, discovered)
-    except PermissionError as exc:
-        print(f"[DEBUG] li_at expired — skipping auth steps: {exc}")
-        _cookie_valid = False
+    # ── Step 2: Skip authenticated HTML probe ────────────────────────────────
+    # Visiting linkedin.com/in/{id}/ with li_at from a cloud IP triggers LinkedIn's
+    # security system and invalidates the cookie after ~2 uses. JSESSIONID obtained
+    # at startup (feed warm-up) is sufficient for all Voyager API calls below.
 
-    # ── Step 3: Authenticated API (gets experience, education, skills, etc.) ───
-    me_data = _check_api_connectivity() if _cookie_valid else None
+    # ── Step 3: Authenticated Voyager API calls ──────────────────────────────
+    me_data = _check_api_connectivity()
     api_ok = me_data is not None
     print(f"[DEBUG] API connectivity: {'OK' if api_ok else 'FAILED'}")
 
