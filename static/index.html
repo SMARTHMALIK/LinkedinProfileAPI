@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LinkedIn Profile API</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f3f2ee;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 48px 16px;
+      color: #1d1d1d;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      margin-bottom: 4px;
+      color: #0a66c2;
+    }
+
+    p.sub {
+      font-size: 0.9rem;
+      color: #666;
+      margin-bottom: 28px;
+    }
+
+    .search-box {
+      display: flex;
+      gap: 8px;
+      width: 100%;
+      max-width: 600px;
+      margin-bottom: 32px;
+    }
+
+    .search-box input {
+      flex: 1;
+      padding: 12px 16px;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .search-box input:focus { border-color: #0a66c2; }
+
+    .search-box button {
+      padding: 12px 24px;
+      background: #0a66c2;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      white-space: nowrap;
+    }
+
+    .search-box button:hover { background: #004182; }
+    .search-box button:disabled { background: #aaa; cursor: not-allowed; }
+
+    #status {
+      font-size: 0.9rem;
+      color: #666;
+      margin-bottom: 20px;
+      min-height: 20px;
+    }
+
+    #status.error { color: #cc0000; }
+
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+      width: 100%;
+      max-width: 680px;
+      overflow: hidden;
+      display: none;
+    }
+
+    .banner {
+      width: 100%;
+      height: 140px;
+      object-fit: cover;
+      background: #d0e8ff;
+      display: block;
+    }
+
+    .banner-placeholder {
+      width: 100%;
+      height: 140px;
+      background: linear-gradient(135deg, #0a66c2 0%, #0091ae 100%);
+    }
+
+    .profile-header {
+      padding: 0 24px 20px;
+      position: relative;
+    }
+
+    .avatar-wrap {
+      position: relative;
+      display: inline-block;
+      margin-top: -40px;
+      margin-bottom: 8px;
+    }
+
+    .avatar {
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      border: 3px solid #fff;
+      object-fit: cover;
+      background: #ccc;
+      display: block;
+    }
+
+    .avatar-placeholder {
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      border: 3px solid #fff;
+      background: #0a66c2;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2rem;
+      color: #fff;
+      margin-top: -40px;
+      margin-bottom: 8px;
+    }
+
+    .name { font-size: 1.25rem; font-weight: 700; margin-bottom: 2px; }
+    .headline { font-size: 0.95rem; color: #444; margin-bottom: 4px; }
+    .location { font-size: 0.85rem; color: #888; }
+
+    .about {
+      padding: 0 24px 16px;
+      font-size: 0.9rem;
+      line-height: 1.6;
+      color: #333;
+      border-top: 1px solid #f0f0f0;
+      padding-top: 16px;
+    }
+
+    .section { padding: 16px 24px; border-top: 1px solid #f0f0f0; }
+    .section h2 { font-size: 1rem; font-weight: 700; margin-bottom: 12px; color: #1d1d1d; }
+
+    .item { margin-bottom: 14px; }
+    .item:last-child { margin-bottom: 0; }
+    .item-title { font-weight: 600; font-size: 0.9rem; }
+    .item-sub { font-size: 0.85rem; color: #555; margin-top: 1px; }
+    .item-date { font-size: 0.8rem; color: #888; margin-top: 2px; }
+
+    .pills { display: flex; flex-wrap: wrap; gap: 8px; }
+    .pill {
+      background: #f0f4f8;
+      border-radius: 20px;
+      padding: 5px 14px;
+      font-size: 0.82rem;
+      color: #1d1d1d;
+      border: 1px solid #dde3ea;
+    }
+
+    .spinner {
+      width: 24px; height: 24px;
+      border: 3px solid #ddd;
+      border-top-color: #0a66c2;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      display: inline-block;
+      vertical-align: middle;
+      margin-right: 8px;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+  <h1>LinkedIn Profile API</h1>
+  <p class="sub">Enter a LinkedIn profile URL to fetch structured data</p>
+
+  <div class="search-box">
+    <input id="urlInput" type="text"
+      placeholder="https://www.linkedin.com/in/john-doe"
+      autocomplete="off" />
+    <button id="fetchBtn" onclick="fetchProfile()">Fetch</button>
+  </div>
+
+  <div id="status"></div>
+
+  <div class="card" id="card"></div>
+
+  <script>
+    const input = document.getElementById('urlInput');
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') fetchProfile(); });
+
+    async function fetchProfile() {
+      const url = input.value.trim();
+      if (!url) return;
+
+      const btn = document.getElementById('fetchBtn');
+      const status = document.getElementById('status');
+      const card = document.getElementById('card');
+
+      btn.disabled = true;
+      card.style.display = 'none';
+      status.className = '';
+      status.innerHTML = '<span class="spinner"></span>Fetching profile...';
+
+      try {
+        const resp = await fetch('/profile?url=' + encodeURIComponent(url));
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          status.className = 'error';
+          status.textContent = data.detail || 'Error ' + resp.status;
+          return;
+        }
+
+        status.textContent = '';
+        renderCard(data);
+      } catch (err) {
+        status.className = 'error';
+        status.textContent = 'Request failed: ' + err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function renderCard(d) {
+      const card = document.getElementById('card');
+      let html = '';
+
+      // Banner
+      if (d.backgroundImage) {
+        html += `<img class="banner" src="${esc(d.backgroundImage)}" onerror="this.style.display='none'" />`;
+      } else {
+        html += `<div class="banner-placeholder"></div>`;
+      }
+
+      // Header
+      html += `<div class="profile-header">`;
+      if (d.profilePicture) {
+        html += `<img class="avatar" src="${esc(d.profilePicture)}" onerror="this.outerHTML='<div class=avatar-placeholder>👤</div>'" />`;
+      } else {
+        html += `<div class="avatar-placeholder">👤</div>`;
+      }
+      if (d.name) html += `<div class="name">${esc(d.name)}</div>`;
+      if (d.headline) html += `<div class="headline">${esc(d.headline)}</div>`;
+      if (d.location) html += `<div class="location">📍 ${esc(d.location)}</div>`;
+      html += `</div>`;
+
+      // About
+      if (d.about) {
+        html += `<div class="about">${esc(d.about)}</div>`;
+      }
+
+      // Experience
+      if (d.experience && d.experience.length) {
+        html += `<div class="section"><h2>Experience</h2>`;
+        for (const e of d.experience) {
+          html += `<div class="item">`;
+          if (e.title) html += `<div class="item-title">${esc(e.title)}</div>`;
+          if (e.company) html += `<div class="item-sub">${esc(e.company)}${e.location ? ' · ' + esc(e.location) : ''}</div>`;
+          const dates = [e.startDate, e.isCurrent ? 'Present' : e.endDate].filter(Boolean).join(' – ');
+          if (dates) html += `<div class="item-date">${esc(dates)}</div>`;
+          html += `</div>`;
+        }
+        html += `</div>`;
+      }
+
+      // Education
+      if (d.education && d.education.length) {
+        html += `<div class="section"><h2>Education</h2>`;
+        for (const e of d.education) {
+          html += `<div class="item">`;
+          if (e.school) html += `<div class="item-title">${esc(e.school)}</div>`;
+          const deg = [e.degree, e.fieldOfStudy].filter(Boolean).join(', ');
+          if (deg) html += `<div class="item-sub">${esc(deg)}</div>`;
+          const dates = [e.startDate, e.endDate].filter(Boolean).join(' – ');
+          if (dates) html += `<div class="item-date">${esc(dates)}</div>`;
+          html += `</div>`;
+        }
+        html += `</div>`;
+      }
+
+      // Skills
+      if (d.skills && d.skills.length) {
+        html += `<div class="section"><h2>Skills</h2><div class="pills">`;
+        for (const s of d.skills) {
+          html += `<span class="pill">${esc(s.name)}</span>`;
+        }
+        html += `</div></div>`;
+      }
+
+      // Certifications
+      if (d.certifications && d.certifications.length) {
+        html += `<div class="section"><h2>Certifications</h2>`;
+        for (const c of d.certifications) {
+          html += `<div class="item">`;
+          if (c.name) html += `<div class="item-title">${esc(c.name)}</div>`;
+          if (c.authority) html += `<div class="item-sub">${esc(c.authority)}</div>`;
+          if (c.issuedDate) html += `<div class="item-date">Issued ${esc(c.issuedDate)}</div>`;
+          html += `</div>`;
+        }
+        html += `</div>`;
+      }
+
+      // Languages
+      if (d.languages && d.languages.length) {
+        html += `<div class="section"><h2>Languages</h2><div class="pills">`;
+        for (const l of d.languages) {
+          const label = l.proficiency ? `${l.name} (${l.proficiency})` : l.name;
+          html += `<span class="pill">${esc(label)}</span>`;
+        }
+        html += `</div></div>`;
+      }
+
+      card.innerHTML = html;
+      card.style.display = 'block';
+    }
+
+    function esc(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+  </script>
+</body>
+</html>
