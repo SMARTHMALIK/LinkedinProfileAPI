@@ -1,8 +1,12 @@
 # LinkedIn Profile API
 
-A FastAPI server that accepts a LinkedIn profile URL and returns structured JSON profile data using pure HTTP calls to LinkedIn's internal endpoints — no browser, no Selenium.
+A FastAPI server that accepts a LinkedIn profile URL and returns structured JSON profile data using pure HTTP calls to LinkedIn's internal endpoints
 
 ---
+## Deployed Link:
+```
+https://linkedinprofileapi-xtu8.onrender.com/
+```
 
 ## Setup Instructions
 
@@ -34,7 +38,6 @@ Fill in `.env`:
 ```
 LINKEDIN_LI_AT=your_li_at_value_here
 LINKEDIN_JSESSIONID=ajax:your_jsessionid_here
-LINKEDIN_GRAPHQL_QUERY_ID=voyagerIdentityDashProfiles.b5c27c04968c409fc0ed3546575b9b7a
 ```
 
 ### 4. Run
