@@ -713,6 +713,41 @@ def _get_profile_via_graphql(public_id: str, urn: str = "") -> dict | None:
     return result
 
 
+def _extract_from_me(me_data: dict, public_id: str) -> dict:
+    """
+    Extract profile fields from /me MiniProfile.
+    Only applies when the queried profile matches the logged-in user's publicIdentifier
+    (i.e. the li_at cookie belongs to the same person being queried).
+    """
+    for obj in me_data.get("included", []):
+        if "MiniProfile" not in obj.get("$type", ""):
+            continue
+        if obj.get("publicIdentifier", "").lower() != public_id.lower():
+            return {}
+        from app.parser import _best_image_url
+        first = obj.get("firstName", "")
+        last = obj.get("lastName", "")
+        data = {}
+        if first or last:
+            data["name"] = f"{first} {last}".strip()
+        if obj.get("occupation"):
+            data["headline"] = obj["occupation"]
+        pic = _best_image_url(obj.get("picture"))
+        if pic:
+            data["profilePicture"] = pic
+        bg = _best_image_url(obj.get("backgroundImage"))
+        if bg:
+            data["backgroundImage"] = bg
+        for urn_key in ("dashEntityUrn", "entityUrn", "objectUrn"):
+            urn = obj.get(urn_key, "")
+            if "fsd_profile" in urn or "member" in urn:
+                data["urn"] = urn
+                break
+        print(f"[DEBUG] /me match — extracted: {list(data.keys())}")
+        return data
+    return {}
+
+
 def _check_api_connectivity() -> dict | None:
     """Verify API access via /voyager/api/me. Returns the /me data dict on success, None on failure."""
     sess = session.get_session()
@@ -768,6 +803,13 @@ def fetch_all(url_or_id: str) -> dict:
     me_data = _check_api_connectivity()
     api_ok = me_data is not None
     print(f"[DEBUG] API connectivity: {'OK' if api_ok else 'FAILED'}")
+
+    # If the li_at cookie belongs to the queried profile, /me has their full data
+    if me_data:
+        me_fields = _extract_from_me(me_data, public_id)
+        for k, v in me_fields.items():
+            if v and k not in html_data:
+                html_data[k] = v
 
     classic_profile = None
     profile_view = None
