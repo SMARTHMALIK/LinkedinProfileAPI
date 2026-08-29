@@ -78,51 +78,64 @@ _PUBLIC_HEADERS = {
 }
 
 
-def _get_public_html(public_id: str) -> str:
-    """
-    Fetch the LinkedIn profile page WITHOUT authentication.
-    LinkedIn renders full profile data server-side for unauthenticated requests
-    (SEO / Google indexing). Uses curl_cffi to impersonate Chrome's TLS fingerprint
-    so LinkedIn's bot-detection does not return 999.
-    """
-    url = f"https://www.linkedin.com/in/{public_id}/"
+def _try_fetch_html(url: str, label: str, extra_headers: dict = None) -> str:
+    """Shared fetch logic: tries curl_cffi (chrome120) first, then requests fallback."""
+    headers = dict(_PUBLIC_HEADERS)
+    if extra_headers:
+        headers.update(extra_headers)
     html = ""
 
-    # ── Attempt 1: curl_cffi with Chrome TLS fingerprint (bypasses 999) ─────
     try:
         from curl_cffi import requests as _curl
-        resp = _curl.get(url, headers=_PUBLIC_HEADERS, impersonate="chrome110", timeout=15)
-        print(f"[DEBUG] Public HTML (curl_cffi): status={resp.status_code}, length={len(resp.text)}")
-        if resp.status_code == 200:
-            html = resp.text
+        for impersonate in ("chrome120", "chrome110", "safari15_5"):
+            try:
+                resp = _curl.get(url, headers=headers, impersonate=impersonate, timeout=15)
+                print(f"[DEBUG] {label} ({impersonate}): status={resp.status_code}")
+                if resp.status_code == 200:
+                    html = resp.text
+                    break
+                if resp.status_code != 999:
+                    break
+            except Exception:
+                continue
     except ImportError:
-        print("[DEBUG] curl_cffi not available — falling back to requests")
-    except Exception as exc:
-        print(f"[DEBUG] curl_cffi error: {exc}")
+        pass
 
-    # ── Attempt 2: plain requests fallback ───────────────────────────────────
     if not html:
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         try:
-            resp = _requests.get(url, headers=_PUBLIC_HEADERS, verify=False, timeout=15, allow_redirects=True)
-            print(f"[DEBUG] Public HTML (requests): status={resp.status_code}, length={len(resp.text)}")
-            if resp.status_code == 999:
-                print("[DEBUG] Public HTML blocked (999) — LinkedIn anti-bot.")
-            elif resp.status_code == 200:
+            resp = _requests.get(url, headers=headers, verify=False, timeout=15, allow_redirects=True)
+            print(f"[DEBUG] {label} (requests): status={resp.status_code}")
+            if resp.status_code == 200:
                 html = resp.text
         except Exception as exc:
-            print(f"[DEBUG] Public HTML requests error: {exc}")
+            print(f"[DEBUG] {label} error: {exc}")
 
-    if not html:
-        return ""
+    return html
 
-    has_headline = bool(re.search(r'"headline"\s*:\s*"[^"]{3,}"', html))
-    has_ld = "<script type=\"application/ld+json\">" in html
-    print(f"[DEBUG] Public HTML — has headline JSON: {has_headline}, has JSON-LD: {has_ld}")
-    if has_headline or has_ld:
-        return html
-    print("[DEBUG] Public HTML returned but has no usable profile data (bot-wall page?)")
+
+def _get_public_html(public_id: str) -> str:
+    """
+    Fetch LinkedIn profile HTML without authentication. Tries three URLs:
+    1. Main site  2. Mobile-lite site (different bot rules)
+    LinkedIn renders full JSON-LD for unauthenticated requests for SEO purposes.
+    """
+    for url, label in [
+        (f"https://www.linkedin.com/in/{public_id}/", "Main public HTML"),
+        (f"https://www.linkedin.com/mwlite/in/{public_id}/", "mwlite HTML"),
+        (f"https://www.linkedin.com/pub/{public_id}/en/", "pub HTML"),
+    ]:
+        html = _try_fetch_html(url, label)
+        if html:
+            has_headline = bool(re.search(r'"headline"\s*:\s*"[^"]{3,}"', html))
+            has_ld = "<script type=\"application/ld+json\">" in html
+            print(f"[DEBUG] {label} — headline JSON: {has_headline}, JSON-LD: {has_ld}")
+            if has_headline or has_ld:
+                return html
+            print(f"[DEBUG] {label} returned but no usable profile data (bot-wall?)")
+
+    print("[DEBUG] All public HTML attempts blocked (999 / no data)")
     return ""
 
 
@@ -260,10 +273,25 @@ def _extract_from_html(html: str) -> dict:
     m = re.search(r"<title>([^<|]+?)\s*\|\s*LinkedIn</title>", html)
     if m:
         name = m.group(1).strip()
-        # LinkedIn appends "- Company" to public profile titles — strip it
         if ' - ' in name:
             name = name.rsplit(' - ', 1)[0].strip()
         result["name"] = name
+
+    # og:description often contains "Headline · location · about snippet"
+    m = re.search(r'<meta\s+(?:property|name)=["\']og:description["\']\s+content=["\']([^"\']{10,})["\']', html)
+    if not m:
+        m = re.search(r'<meta\s+content=["\']([^"\']{10,})["\']\s+(?:property|name)=["\']og:description["\']', html)
+    if m:
+        og_desc = m.group(1).strip()
+        print(f"[DEBUG] og:description: {og_desc[:120]!r}")
+        # Format: "Headline · location · about..." OR just "about..."
+        parts = [p.strip() for p in og_desc.split(' · ')]
+        if len(parts) >= 2 and "headline" not in result:
+            result["headline"] = parts[0]
+        if len(parts) >= 3 and "location" not in result:
+            result["location"] = parts[1]
+        if len(parts) >= 1 and "about" not in result:
+            result["about"] = og_desc
 
     # LinkedIn sometimes embeds JSON blobs inside <code id="bpr-guid-..."> tags —
     # these contain the full profile state including headline/summary/location.
@@ -622,6 +650,7 @@ def _graphql_get(qid: str, variables: str, public_id: str, sess, headers: dict) 
                 if profile_obj:
                     print(f"[DEBUG]   Profile keys: {list(profile_obj.keys())[:20]}")
                     print(f"[DEBUG]   headline={profile_obj.get('headline')!r}  firstName={profile_obj.get('firstName')!r}")
+                    print(f"[DEBUG]   $recipeTypes={profile_obj.get('$recipeTypes', [])}")
             return data
         print(f"[DEBUG]   body: {resp.text[:200]}")
     except _requests.exceptions.TooManyRedirects:
