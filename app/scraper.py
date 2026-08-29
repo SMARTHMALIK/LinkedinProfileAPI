@@ -361,31 +361,47 @@ def _resolve_urn(public_id: str) -> str | None:
     return None
 
 
-def _get_from_search(public_id: str) -> dict:
+def _get_from_typeahead(public_id: str) -> dict:
     """
-    Blended search by vanity name — returns MiniProfile objects in 'included'.
-    Each MiniProfile has firstName, lastName, occupation (headline), publicIdentifier.
-    Works with the same session/cookies as all other Voyager calls.
+    Typeahead search by vanity name.
+    Returns name + headline from hits (subtext field) and MiniProfile in included.
     """
     result = _get(
-        "/search/blended",
+        "/typeahead/hitsV2",
         public_id,
         params={
             "keywords": public_id,
             "origin": "GLOBAL_SEARCH_HEADER",
-            "q": "all",
+            "q": "TYPE_AHEAD_QUERY",
             "type": "PEOPLE",
-            "count": "5",
         },
     )
     if not result:
         return {}
     data: dict = {}
+
+    # Non-normalized: elements → hits (each hit has text, subtext, targetUrn)
+    for el in result.get("elements", []):
+        for hit in el.get("hits", [el]):
+            urn = hit.get("targetUrn", "") or hit.get("objectUrn", "")
+            if not any(x in urn for x in ("fsd_profile", "member")):
+                continue
+            text = hit.get("text", "")
+            subtext = hit.get("subtext", "")
+            if isinstance(text, dict):
+                text = text.get("text", "")
+            if isinstance(subtext, dict):
+                subtext = subtext.get("text", "")
+            if text and "name" not in data:
+                data["name"] = text
+            if subtext and "headline" not in data:
+                data["headline"] = subtext
+            break
+
+    # Normalized: included may contain MiniProfile with occupation/picture
     for obj in result.get("included", []):
-        t = obj.get("$type", "")
-        if "MiniProfile" not in t:
+        if "MiniProfile" not in obj.get("$type", ""):
             continue
-        # Prefer the exact vanity-name match; otherwise take first PEOPLE result
         is_exact = obj.get("publicIdentifier", "").lower() == public_id.lower()
         if not data or is_exact:
             first = obj.get("firstName", "")
@@ -403,7 +419,18 @@ def _get_from_search(public_id: str) -> dict:
                     data["profilePicture"] = url
         if is_exact:
             break
-    print(f"[DEBUG] Search extracted: {list(data.keys())}")
+
+    print(f"[DEBUG] Typeahead extracted: {list(data.keys())}")
+    return data
+
+
+def _get_dash_profile_by_urn_path(urn: str, public_id: str) -> dict | None:
+    """Try Dash profiles endpoint with URN directly in the URL path."""
+    import urllib.parse
+    encoded = urllib.parse.quote(urn, safe="")
+    data = _get(f"/identity/dash/profiles/{encoded}", public_id)
+    if data:
+        print(f"[DEBUG] Dash URN-path: keys={list(data.keys())[:10]}")
     return data
 
 
@@ -691,21 +718,24 @@ def fetch_all(url_or_id: str) -> dict:
     print(f"[DEBUG] html_data after public fetch: {list(html_data.keys())}")
 
     # ── Step 2: Authenticated HTML visit (side effect: gets JSESSIONID) ────────
-    auth_html = _get_profile_html(public_id)
-    if auth_html:
-        auth_data = _extract_from_html(auth_html)
-        for k, v in auth_data.items():
-            if v and k not in html_data:
-                html_data[k] = v
-        # Bundle discovery: find GraphQL queryId / decoration ID (cached)
-        if not (_discovered_decoration and _discovered_graphql_query_id):
-            discovered = discover_decoration_from_bundles(auth_html)
-            if discovered and discovered not in _DECORATION_IDS:
-                _DECORATION_IDS.insert(0, discovered)
+    _cookie_valid = True
+    try:
+        auth_html = _get_profile_html(public_id)
+        if auth_html:
+            auth_data = _extract_from_html(auth_html)
+            for k, v in auth_data.items():
+                if v and k not in html_data:
+                    html_data[k] = v
+            if not (_discovered_decoration and _discovered_graphql_query_id):
+                discovered = discover_decoration_from_bundles(auth_html)
+                if discovered and discovered not in _DECORATION_IDS:
+                    _DECORATION_IDS.insert(0, discovered)
+    except PermissionError as exc:
+        print(f"[DEBUG] li_at expired — skipping auth steps: {exc}")
+        _cookie_valid = False
 
     # ── Step 3: Authenticated API (gets experience, education, skills, etc.) ───
-    # Only needed if public HTML didn't return enough.
-    me_data = _check_api_connectivity()
+    me_data = _check_api_connectivity() if _cookie_valid else None
     api_ok = me_data is not None
     print(f"[DEBUG] API connectivity: {'OK' if api_ok else 'FAILED'}")
 
@@ -716,9 +746,9 @@ def fetch_all(url_or_id: str) -> dict:
     if api_ok:
         urn = html_data.get("urn", "")
 
-        # ── Blended search: fallback for name/headline/picture when HTML blocked ─
-        search_data = _get_from_search(public_id)
-        for k, v in search_data.items():
+        # ── Typeahead: fallback for name/headline/picture when HTML blocked ────────
+        ta_data = _get_from_typeahead(public_id)
+        for k, v in ta_data.items():
             if v and k not in html_data:
                 html_data[k] = v
 
@@ -736,6 +766,9 @@ def fetch_all(url_or_id: str) -> dict:
 
         if not profile_view and not dash_profile and urn:
             dash_profile = _get_dash_profile_by_urn(urn, public_id)
+
+        if not profile_view and not dash_profile and urn:
+            dash_profile = _get_dash_profile_by_urn_path(urn, public_id)
     else:
         print("[DEBUG] Skipping authenticated API calls")
 
@@ -748,10 +781,10 @@ def fetch_all(url_or_id: str) -> dict:
         print(f"[DEBUG] dash_profile keys: {list(dash_profile.keys())}")
 
     # If we have nothing at all, fail clearly
-    if not classic_profile and not profile_view and not dash_profile and not html_data.get("name"):
+    if not classic_profile and not profile_view and not dash_profile and not html_data.get("name") and not html_data.get("headline"):
         raise LookupError(
             f"Profile '{public_id}' not found or is private. "
-            "Make sure the profile is public and your li_at cookie is valid."
+            "Make sure the profile is public."
         )
 
     return {
