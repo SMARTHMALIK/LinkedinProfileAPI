@@ -4,9 +4,7 @@ A FastAPI server that accepts a LinkedIn profile URL and returns structured JSON
 
 ---
 ## Deployed Link:
-```
 https://linkedinprofileapi-xtu8.onrender.com/
-```
 
 ## Setup Instructions
 
