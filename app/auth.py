@@ -66,32 +66,50 @@ class LinkedInSession:
         return sess
 
     def _login_with_credentials(self, sess: requests.Session, email: str, password: str) -> bool:
-        """POST email+password to LinkedIn's login form. Returns True on success."""
+        """
+        POST email+password to LinkedIn's login form.
+        Uses curl_cffi with Chrome impersonation so LinkedIn serves the real login
+        page (not a bot-wall) even from datacenter IPs. Returns True on success.
+        """
+        try:
+            from curl_cffi.requests import Session as _CurlSess
+            curl_sess = _CurlSess(impersonate="chrome120")
+            use_curl = True
+        except ImportError:
+            curl_sess = None
+            use_curl = False
+
+        _get = curl_sess.get if use_curl else sess.get
+        _post = curl_sess.post if use_curl else sess.post
+
         try:
             # Step 1: GET login page for CSRF token
-            resp = sess.get(
+            resp = _get(
                 "https://www.linkedin.com/login",
-                headers={"Referer": "https://www.linkedin.com/"},
+                headers={
+                    "Referer": "https://www.linkedin.com/",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
                 timeout=15,
             )
-            print(f"[DEBUG] Login page GET: {resp.status_code}")
+            print(f"[DEBUG] Login page GET: {resp.status_code} (curl_cffi={use_curl})")
 
-            # Extract loginCsrfParam from the form
-            csrf_match = re.search(
-                r'name=["\']loginCsrfParam["\'][^>]+value=["\']([^"\']+)["\']',
-                resp.text,
-            ) or re.search(
-                r'loginCsrfParam.*?value=["\']([^"\']+)["\']',
-                resp.text,
-                re.DOTALL,
+            # Try multiple patterns — LinkedIn has changed this field across versions
+            csrf_match = (
+                re.search(r'name=["\']loginCsrfParam["\'][^>]*value=["\']([^"\']+)["\']', resp.text)
+                or re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']loginCsrfParam["\']', resp.text)
+                or re.search(r'"loginCsrfParam"\s*[,:\s]*"([^"]+)"', resp.text)
+                or re.search(r'loginCsrfParam[^"\']*["\']([a-zA-Z0-9_\-]{8,})["\']', resp.text)
             )
             if not csrf_match:
-                print("[DEBUG] loginCsrfParam not found — LinkedIn may have changed their login page")
+                print(f"[DEBUG] loginCsrfParam not found. Page snippet: {resp.text[:800]!r}")
                 return False
             csrf_token = csrf_match.group(1)
+            print(f"[DEBUG] CSRF token found: {csrf_token[:12]}...")
 
             # Step 2: POST credentials
-            resp = sess.post(
+            resp = _post(
                 "https://www.linkedin.com/checkpoint/lg/login-submit",
                 data={
                     "session_key": email,
@@ -107,26 +125,35 @@ class LinkedInSession:
                 },
                 timeout=15,
             )
-            print(f"[DEBUG] Login POST: status={resp.status_code}, final_url={resp.url[:80]}")
+            print(f"[DEBUG] Login POST: status={resp.status_code}, url={str(resp.url)[:80]}")
 
-            li_at = sess.cookies.get("li_at", "")
-            jsid = sess.cookies.get("JSESSIONID", "")
-            print(f"[DEBUG] Post-login cookies — li_at={'yes' if li_at else 'NO'}, JSESSIONID={'yes' if jsid else 'NO'}")
+            # Extract li_at from whichever session has it
+            if use_curl:
+                li_at = curl_sess.cookies.get("li_at", "")
+                jsid = curl_sess.cookies.get("JSESSIONID", "")
+            else:
+                li_at = sess.cookies.get("li_at", "")
+                jsid = sess.cookies.get("JSESSIONID", "")
+
+            print(f"[DEBUG] Cookies: li_at={'yes' if li_at else 'NO'}, JSESSIONID={'yes' if jsid else 'NO'}")
 
             if li_at:
+                # Transfer cookies to the long-lived requests session used by Voyager API
+                sess.cookies.set("li_at", li_at, domain=".linkedin.com", path="/")
+                if jsid:
+                    sess.cookies.set("JSESSIONID", jsid, domain=".linkedin.com", path="/")
                 print("[DEBUG] Login successful!")
                 return True
 
-            if "checkpoint" in resp.url or "challenge" in resp.url or "verification" in resp.url:
-                print(f"[DEBUG] LinkedIn security challenge: {resp.url} — cannot proceed without 2FA/CAPTCHA")
+            url_str = str(resp.url)
+            if any(k in url_str for k in ("checkpoint", "challenge", "verification", "security")):
+                print(f"[DEBUG] Security challenge triggered: {url_str}")
+                print("[DEBUG] Go to LinkedIn in a browser, approve the login from this IP, then redeploy.")
                 return False
 
-            print(f"[DEBUG] Login failed: no li_at cookie received. Snippet: {resp.text[:300]!r}")
+            print(f"[DEBUG] Login failed — no li_at. Snippet: {resp.text[:400]!r}")
             return False
 
-        except requests.exceptions.TooManyRedirects:
-            print("[DEBUG] Login redirect loop")
-            return False
         except Exception as exc:
             print(f"[DEBUG] Login error: {type(exc).__name__}: {exc}")
             return False
