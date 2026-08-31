@@ -25,8 +25,11 @@ class LinkedInSession:
     def login(self) -> requests.Session:
         email = os.getenv("LINKEDIN_EMAIL")
         password = os.getenv("LINKEDIN_PASSWORD")
-        li_at = os.getenv("LINKEDIN_LI_AT")
-        jsessionid = os.getenv("LINKEDIN_JSESSIONID", "")
+        li_at = (os.getenv("LINKEDIN_LI_AT") or "").strip()
+        # LinkedIn's JSESSIONID cookie value is quoted ("ajax:123..."). python-dotenv
+        # strips surrounding quotes from .env values while a real environment
+        # variable keeps them, so normalise here to behave identically in both.
+        jsessionid = (os.getenv("LINKEDIN_JSESSIONID") or "").strip().strip('"')
 
         sess = requests.Session()
         sess.headers.update(HEADERS)
@@ -41,7 +44,12 @@ class LinkedInSession:
         if li_at:
             sess.cookies.set("li_at", li_at, domain=".linkedin.com", path="/")
             if jsessionid:
-                sess.cookies.set("JSESSIONID", jsessionid, domain=".linkedin.com", path="/")
+                # The cookie itself must carry the quotes; get_voyager_headers()
+                # strips them again for the csrf-token header.
+                sess.cookies.set(
+                    "JSESSIONID", f'"{jsessionid}"',
+                    domain=".linkedin.com", path="/",
+                )
                 print("[DEBUG] Using li_at + JSESSIONID from env")
             else:
                 print("[DEBUG] Using li_at from env (no JSESSIONID — Voyager calls may 403)")
