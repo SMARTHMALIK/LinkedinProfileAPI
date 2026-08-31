@@ -7,13 +7,19 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import scraper, parser
-from app.auth import session
+from app.auth import session, SessionInvalid
 from app.models import ProfileResponse
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    session.login()   # authenticate at startup using LINKEDIN_EMAIL / LINKEDIN_PASSWORD
+    session.login()
+    # Confirm the cookie actually works instead of assuming it does — LinkedIn
+    # leaves a rejected cookie sitting in the jar, so presence proves nothing.
+    if session.validate():
+        print("[DEBUG] Startup: LinkedIn session is live")
+    else:
+        print("[DEBUG] Startup: no working LinkedIn session — /profile will be limited")
     yield
 
 
@@ -49,10 +55,22 @@ def health():
 
 
 @app.get("/auth/status", tags=["Meta"], summary="Check whether the backend LinkedIn session is active")
-def auth_status():
+def auth_status(
+    validate: bool = Query(
+        False,
+        description=(
+            "Verify the session against LinkedIn instead of reporting the cached "
+            "state. Costs one API call."
+        ),
+    )
+):
+    if validate:
+        session.validate()
+    live = session.is_authenticated()
     return {
-        "authenticated": session.is_authenticated(),
-        "mode": "voyager-api" if session.is_authenticated() else "public-html-only",
+        "authenticated": live,
+        "mode": "voyager-api" if live else "public-html-only",
+        "validated": validate,
     }
 
 
@@ -77,7 +95,8 @@ def auth_retry():
     responses={
         400: {"description": "Invalid or unparseable LinkedIn URL"},
         404: {"description": "Profile not found or private"},
-        429: {"description": "LinkedIn blocked this server's IP (HTTP 999)"},
+        429: {"description": "LinkedIn is throttling the account, or blocked this server's IP (HTTP 999)"},
+        503: {"description": "The backend LinkedIn session cookie has been rejected and must be replaced"},
     },
 )
 def get_profile(
@@ -97,6 +116,11 @@ def get_profile(
 
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+    # Must precede RuntimeError — SessionInvalid subclasses it, and a dead
+    # cookie is a server credential problem (503), not client throttling (429).
+    except SessionInvalid as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
 
     except RuntimeError as exc:
         raise HTTPException(status_code=429, detail=str(exc))

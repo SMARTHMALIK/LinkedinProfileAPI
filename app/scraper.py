@@ -16,9 +16,16 @@ import urllib.parse
 
 import requests as _requests
 
-from app.auth import session
+from app.auth import session, SessionInvalid
 
 BASE_URL = "https://www.linkedin.com/voyager/api"
+
+_DEAD_SESSION_MSG = (
+    "LinkedIn has rejected the stored session cookie — it is no longer valid. "
+    "This is not throttling and will not clear on its own; the cookie has to be "
+    "replaced. Copy a fresh li_at from a logged-in browser (see 'Refreshing the "
+    "session' in the README) and update LINKEDIN_COOKIES / LINKEDIN_LI_AT."
+)
 
 
 def extract_public_id(url_or_id: str) -> str:
@@ -53,19 +60,24 @@ def _get(path: str, public_id: str = "", params: dict = None) -> dict | None:
     headers = session.get_voyager_headers()
     headers["Referer"] = referer
 
+    # A Voyager API call never legitimately redirects. LinkedIn answers a
+    # rejected cookie by bouncing the request back to its own URL in a loop,
+    # sending `Set-Cookie: li_at=delete me` on every hop, so treat any 3xx as a
+    # dead session and stop rather than burning redirects to reach the same
+    # conclusion.
     try:
-        resp = sess.get(url, headers=headers, params=params, timeout=15)
-    except _requests.exceptions.TooManyRedirects:
-        # LinkedIn redirects API calls to the login page when it rejects the
-        # session — usually throttling after a burst of requests. This is NOT
-        # "profile not found", so it must not be reported as a 404.
-        print(f"[DEBUG] GET {path} → redirected to login (session rejected)")
-        raise RuntimeError(
-            "LinkedIn rejected the session for this request. This usually means "
-            "the account is being throttled after too many requests in a short "
-            "window — wait a few minutes and retry. If it persists, regenerate "
-            "LINKEDIN_LI_AT with tools/get_li_at.py."
+        resp = sess.get(
+            url, headers=headers, params=params, timeout=15, allow_redirects=False
         )
+    except _requests.exceptions.TooManyRedirects:
+        session.mark_invalid(f"{path} exhausted redirects")
+        raise SessionInvalid(_DEAD_SESSION_MSG)
+
+    if resp.is_redirect or resp.status_code in (301, 302, 303, 307, 308):
+        location = resp.headers.get("Location", "")[:100]
+        print(f"[DEBUG] GET {path} → {resp.status_code} redirect to {location}")
+        session.mark_invalid(f"{path} redirected to {location}")
+        raise SessionInvalid(_DEAD_SESSION_MSG)
 
     print(f"[DEBUG] GET {path} → {resp.status_code}")
 
@@ -75,11 +87,15 @@ def _get(path: str, public_id: str = "", params: dict = None) -> dict | None:
 
     if resp.status_code == 401:
         # Session expired mid-request — re-authenticate and retry once.
-        session.relogin()
+        if not session.relogin():
+            session.mark_invalid(f"{path} returned 401 and re-login failed")
+            raise SessionInvalid(_DEAD_SESSION_MSG)
         sess = session.get_session()
         headers = session.get_voyager_headers()
         headers["Referer"] = referer
-        resp = sess.get(url, headers=headers, params=params, timeout=15)
+        resp = sess.get(
+            url, headers=headers, params=params, timeout=15, allow_redirects=False
+        )
 
     if resp.status_code in (400, 403):
         print(f"[DEBUG] {resp.status_code} body: {resp.text[:300]}")
@@ -130,6 +146,10 @@ def _dash_section(section: str, urn: str, public_id: str, type_suffix: str) -> l
             public_id,
             params={"q": "viewee", "profileUrn": urn},
         )
+    except SessionInvalid:
+        # A dead session affects every remaining call, so surface it instead of
+        # quietly returning a profile with all its sections mysteriously empty.
+        raise
     except RuntimeError as exc:
         # A throttled section shouldn't discard the profile we already have —
         # return what we can and leave this section empty.
@@ -498,6 +518,12 @@ def fetch_all(url_or_id: str) -> dict:
     if not profile and not any(
         html_data.get(k) for k in ("name", "headline", "profilePicture")
     ):
+        # A cookie was supplied and LinkedIn rejected it. Say that, rather than
+        # reporting the IP block we only hit because we fell back to public HTML —
+        # otherwise the fix looks like "add a cookie" when one is already set.
+        if session.was_rejected():
+            raise SessionInvalid(_DEAD_SESSION_MSG)
+
         # An authenticated Dash lookup that comes back empty is a definitive
         # "no such profile" — don't let the blocked HTML fallback mask that as
         # an IP-block error, or every mistyped URL would report 429.

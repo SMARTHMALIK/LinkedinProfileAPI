@@ -18,13 +18,29 @@ HEADERS = {
 }
 
 
+class SessionInvalid(RuntimeError):
+    """
+    LinkedIn has explicitly rejected the stored session cookie.
+
+    Distinct from throttling: LinkedIn answers a rejected cookie by redirecting
+    the API call back to itself while sending `Set-Cookie: li_at=delete me`.
+    Waiting does not help — the cookie has to be replaced.
+    """
+
+
 class LinkedInSession:
     def __init__(self):
         self._session: requests.Session | None = None
+        # Set once LinkedIn tells us the cookie is dead. The cookie jar cannot be
+        # trusted for this: LinkedIn scopes its deletion to `.www.linkedin.com`
+        # while we set ours on `.linkedin.com`, so the delete never matches and a
+        # rejected cookie keeps sitting in the jar looking perfectly healthy.
+        self._invalidated = False
 
     def login(self) -> requests.Session:
         email = os.getenv("LINKEDIN_EMAIL")
         password = os.getenv("LINKEDIN_PASSWORD")
+        cookie_string = (os.getenv("LINKEDIN_COOKIES") or "").strip()
         li_at = (os.getenv("LINKEDIN_LI_AT") or "").strip()
         # LinkedIn's JSESSIONID cookie value is quoted ("ajax:123..."). python-dotenv
         # strips surrounding quotes from .env values while a real environment
@@ -36,6 +52,18 @@ class LinkedInSession:
         sess.verify = False
         sess.max_redirects = 5
         self._session = sess
+        self._invalidated = False
+
+        # Priority 0: a full cookie string, as copied from a browser's request
+        # headers. Preferred over li_at alone — a browser session carries cookies
+        # (liap, bcookie, bscookie, lidc) that LinkedIn's risk engine expects to
+        # see together, and it has already cleared any device verification.
+        if cookie_string:
+            names = self._apply_cookie_string(sess, cookie_string)
+            print(f"[DEBUG] Using LINKEDIN_COOKIES — {len(names)} cookies: {', '.join(names)}")
+            if "li_at" not in names:
+                print("[DEBUG] WARNING: no li_at in LINKEDIN_COOKIES — requests will be unauthenticated")
+            return sess
 
         # Priority 1: a pre-obtained session cookie.
         # Preferred on cloud hosts: LinkedIn issues a device challenge for logins
@@ -65,6 +93,69 @@ class LinkedInSession:
 
         print("[DEBUG] No usable credentials — running unauthenticated (public HTML only).")
         return sess
+
+    @staticmethod
+    def _apply_cookie_string(sess: requests.Session, raw: str) -> list[str]:
+        """
+        Load a `name=value; name=value` cookie string into the session.
+
+        Accepts exactly what a browser sends in its `Cookie` request header, so
+        the value can be copied straight out of DevTools.
+        """
+        names: list[str] = []
+        for part in raw.split(";"):
+            name, sep, value = part.strip().partition("=")
+            name, value = name.strip(), value.strip()
+            if not (name and sep):
+                continue
+            # LinkedIn stores JSESSIONID quoted; some copy paths lose the quotes.
+            # The cookie must carry them or the CSRF check fails.
+            if name == "JSESSIONID":
+                bare = value.strip('"')
+                value = '"' + bare + '"'
+            sess.cookies.set(name, value, domain=".linkedin.com", path="/")
+            names.append(name)
+        return names
+
+    def was_rejected(self) -> bool:
+        """True when a cookie was supplied and LinkedIn has since rejected it."""
+        return self._invalidated
+
+    def mark_invalid(self, reason: str = "") -> None:
+        """Record that LinkedIn rejected the cookie, so we stop claiming to be authenticated."""
+        if not self._invalidated:
+            print(f"[DEBUG] Session marked INVALID — {reason}")
+        self._invalidated = True
+
+    def validate(self) -> bool:
+        """
+        Ask LinkedIn whether the session actually works, rather than trusting the
+        presence of a cookie. One cheap call against /voyager/api/me.
+        """
+        sess = self._session
+        if not (sess and sess.cookies.get("li_at")):
+            return False
+        try:
+            resp = sess.get(
+                "https://www.linkedin.com/voyager/api/me",
+                headers={
+                    **self.get_voyager_headers(),
+                    "Referer": "https://www.linkedin.com/feed/",
+                },
+                timeout=15,
+                allow_redirects=False,   # a redirect here means the cookie was rejected
+            )
+        except Exception as exc:
+            print(f"[DEBUG] Session validation error: {type(exc).__name__}: {exc}")
+            return False
+
+        if resp.status_code == 200:
+            print("[DEBUG] Session validated against /voyager/api/me")
+            self._invalidated = False
+            return True
+
+        self.mark_invalid(f"/voyager/api/me returned {resp.status_code}")
+        return False
 
     # Mobile app headers — LinkedIn's /uas/authenticate is the programmatic login
     # endpoint used by the Android/iOS apps. It accepts JSESSIONID (from the GET)
@@ -240,6 +331,7 @@ class LinkedInSession:
         sess.cookies.clear()
 
         if self._login_with_credentials(sess, email, password):
+            self._invalidated = False
             return True
 
         # Roll back to the previous session rather than leaving it unauthenticated.
@@ -251,6 +343,10 @@ class LinkedInSession:
         return False
 
     def is_authenticated(self) -> bool:
+        # A cookie in the jar is not proof of a session — LinkedIn's rejection
+        # never removes it (see the note in __init__), so honour _invalidated.
+        if self._invalidated:
+            return False
         return bool(self._session and self._session.cookies.get("li_at"))
 
     def get_session(self) -> requests.Session:

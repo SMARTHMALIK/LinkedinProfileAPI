@@ -33,22 +33,33 @@ LINKEDIN_EMAIL=you@example.com
 LINKEDIN_PASSWORD=your_password
 ```
 
-### 3. Generate a session cookie
+### 3. Supply a session cookie
 
-LinkedIn issues a **device challenge** for logins coming from datacenter IPs, so email/password alone will not authenticate once deployed to a cloud host. Run this from your own machine — your home/office IP is already trusted, so it authenticates cleanly:
+LinkedIn issues a **device challenge** for logins coming from datacenter IPs, so email/password alone will not authenticate once deployed to a cloud host. The service needs a cookie obtained elsewhere.
+
+**Recommended — copy the cookies from a logged-in browser:**
+
+1. Log in to linkedin.com in Chrome
+2. DevTools (<kbd>F12</kbd>) → Application → Cookies → `https://www.linkedin.com`
+3. Copy `li_at`, `JSESSIONID`, `liap` and `bcookie` into a single variable:
+
+```
+LINKEDIN_COOKIES=li_at=AQED...; JSESSIONID="ajax:1234567890123456789"; liap=true; bcookie=v=2&...
+```
+
+`li_at` on its own is not a session. LinkedIn expects it to arrive alongside its supporting cookies and rejects requests that are missing them. A browser session has also already cleared device verification, so it survives far longer than one minted by a script.
+
+**Alternative — mint one programmatically:**
 
 ```bash
 python tools/get_li_at.py
 ```
 
-It prints two values:
+Run it from your own machine; a home/office IP is trusted, so it usually authenticates without a challenge. It verifies the session before printing it and outputs a ready-to-paste `LINKEDIN_COOKIES` line.
 
-```
-LINKEDIN_LI_AT=AQEDAW0-7vsBrkGQAAAB...
-LINKEDIN_JSESSIONID="ajax:9170211800230432869"
-```
+If it reports `CHALLENGE`, LinkedIn has flagged the account and scripted logins will keep being refused — use the browser method above.
 
-Add both to your `.env` for local use, and to your host's environment variables for deployment. Keep `LINKEDIN_EMAIL` / `LINKEDIN_PASSWORD` set too — they are the automatic refresh path when the cookie expires.
+Add the value to `.env` for local use and to your host's environment variables for deployment.
 
 ### 4. Run
 
@@ -124,16 +135,23 @@ GET /profile?url=https://www.linkedin.com/in/satyanadella/
 | `400` | Invalid or unparseable LinkedIn URL |
 | `404` | Profile does not exist, or is not visible to the authenticated account |
 | `429` | LinkedIn is throttling the account, or blocked the server's IP (HTTP 999) with no session available. The `detail` field distinguishes the two. Retry after a few minutes. |
+| `503` | LinkedIn has **rejected** the stored cookie. Not recoverable by waiting — the cookie must be replaced. See [Refreshing the session](#refreshing-the-session). |
 
-A `429` is not fatal — the session is preserved and requests succeed again once LinkedIn releases the throttle. See [Rate limiting](#known-limitations).
+The `429` / `503` split matters. A `429` clears on its own; a `503` never will, because LinkedIn has explicitly invalidated the credential and is answering every API call with a redirect carrying `Set-Cookie: li_at=delete me`.
 
 ### `GET /auth/status`
 
 Reports whether the backend LinkedIn session is active.
 
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `validate` | bool | `false` | Check the session against LinkedIn instead of reporting cached state. Costs one API call. |
+
 ```json
-{ "authenticated": true, "mode": "voyager-api" }
+{ "authenticated": true, "mode": "voyager-api", "validated": false }
 ```
+
+Pass `?validate=true` when you need certainty. The cached answer is set at startup and updated whenever a request discovers the cookie has been rejected.
 
 ### `POST /auth/retry`
 
@@ -194,15 +212,45 @@ This path is also consulted when authenticated to recover the full `"City, State
 
 Requests use `curl_cffi` with a Chrome TLS fingerprint, since LinkedIn returns HTTP 999 to clients whose TLS handshake identifies them as a scripting library.
 
+### Detecting a rejected session
+
+A cookie sitting in the jar is not evidence of a working session. When LinkedIn rejects a cookie it does **not** return `401`; it redirects the API call back to its own URL in a loop, sending this on every hop:
+
+```
+302 Found
+Location:   <the same /voyager/api/... URL>
+Set-Cookie: li_at=delete me; Domain=.www.linkedin.com; Max-Age=0
+Set-Cookie: liap=delete me;  Domain=.linkedin.com;     Max-Age=0
+```
+
+The deletion is scoped to `.www.linkedin.com` while the cookie is set on `.linkedin.com`, so it never matches and the dead cookie stays in the jar looking healthy. Trusting its presence makes the service report itself as authenticated while every request fails.
+
+The service therefore treats **any** 3xx on a Voyager call as a rejected session — those endpoints never legitimately redirect — marks the session invalid, and answers `503` with instructions to replace the cookie. It also validates against `/voyager/api/me` at startup so `/auth/status` is accurate before the first request arrives.
+
+---
+
+## Refreshing the session
+
+When `/profile` returns `503`, or `/auth/status?validate=true` reports `authenticated: false`, the cookie has been rejected and must be replaced.
+
+1. Open linkedin.com in a browser and clear any security prompt on the account
+2. DevTools → Application → Cookies → `https://www.linkedin.com`
+3. Copy `li_at`, `JSESSIONID`, `liap`, `bcookie`
+4. Update `LINKEDIN_COOKIES` in your host's environment variables
+
+**What causes rejection.** LinkedIn's risk engine flags accounts that log in repeatedly from scripts or drive high API volume. A flagged account has its scripted sessions invalidated almost immediately — the symptom is a fresh cookie that works for one request and then fails on every subsequent one. Waiting does not help; the account has to settle, and sessions should come from a browser rather than `/uas/authenticate`.
+
+Once flagged, `python tools/get_li_at.py` will also return `CHALLENGE` even from a trusted IP, which is a useful confirmation of what is happening.
+
 ---
 
 ## Known Limitations
 
 - **Datacenter IPs are blocked for unauthenticated requests.** LinkedIn returns HTTP 999 to cloud provider IP ranges (Render, AWS, GCP, Azure). This does not affect the authenticated Dash API, which is the primary data source — but it does mean the public-HTML fallback is unavailable when deployed, so `location` degrades to a country name. Setting `HTTPS_PROXY` to a residential proxy restores it.
 
-- **Cloud logins hit a device challenge.** Because of the above, `LINKEDIN_EMAIL` / `LINKEDIN_PASSWORD` alone cannot authenticate from a cloud host — LinkedIn responds `{"login_result": "CHALLENGE"}`. This is why `tools/get_li_at.py` exists: generate the session from a trusted IP and supply it as `LINKEDIN_LI_AT`.
+- **Cloud logins hit a device challenge.** Because of the above, `LINKEDIN_EMAIL` / `LINKEDIN_PASSWORD` alone cannot authenticate from a cloud host — LinkedIn responds `{"login_result": "CHALLENGE"}`. The session has to be obtained from a trusted IP and supplied as `LINKEDIN_COOKIES`.
 
-- **Session expiry.** `li_at` is long-lived but is invalidated if LinkedIn's risk engine flags the session. When Voyager calls start returning 401, the service attempts an automatic re-login; if that is challenged, re-run `tools/get_li_at.py` and update the environment variable.
+- **Session rejection is the main operational cost.** `li_at` is nominally long-lived, but LinkedIn's risk engine invalidates it as soon as the account is flagged — and it signals this with a redirect loop, not a `401`, so it is easy to misread as throttling. The service detects it and answers `503`; recovery is manual. See [Refreshing the session](#refreshing-the-session).
 
 - **Visibility is scoped to the authenticated account.** The API returns what your LinkedIn account can see. Fields a member has restricted, or sections only visible to 1st-degree connections, come back empty. Skills, certifications and languages are commonly restricted this way — the endpoints return `200` with an empty `included` array rather than an error.
 
@@ -212,16 +260,11 @@ Requests use `curl_cffi` with a Chrome TLS fingerprint, since LinkedIn returns H
 
 - **LinkedIn changes these endpoints without notice.** They are internal APIs with no stability guarantee — the `410 Gone` on the classic REST endpoints is exactly this happening. Endpoint paths may need revisiting if calls begin failing.
 
-- **Rate limiting is the practical constraint.** Each `/profile` request costs up to **six** Voyager calls (one to resolve the profile, five for the sections) and nothing is cached, so request volume against LinkedIn is six times what it looks like. LinkedIn throttles per-account as well as per-IP, and it does so by **redirecting API calls to the login page** rather than returning `429`. Once throttled, calls keep failing for anywhere from a few minutes to a few hours before the account is released.
+- **Request volume is six times what it looks like.** Each `/profile` call costs up to **six** Voyager requests — one to resolve the vanity slug to a URN, five for the sections — and nothing is cached. Sustained use is what gets an account flagged, and a flagged account has its scripted sessions invalidated on sight, producing the "works once, then fails forever" pattern.
 
-  Two consequences worth knowing:
+  A cache and a request queue would both help materially; neither is implemented here. If LinkedIn does return an explicit `429`, the service surfaces it as `429` and a throttled *section* degrades to an empty list rather than failing the whole request, so a partial fetch still returns the base profile.
 
-  - Rapid successive requests — a loop, or hitting Refresh repeatedly — will trigger it. This is expected behaviour, not a fault in the service; give it a few minutes.
-  - While throttled, **`/uas/authenticate` is challenged too**, so `tools/get_li_at.py` cannot mint a replacement session until the throttle clears. Generate a session *before* heavy testing rather than during it.
-
-  The service reports throttling as `429` with an explanatory message and distinguishes it from a genuine `404`. A throttled *section* call degrades to an empty list rather than failing the whole request, so a partially-throttled fetch still returns the base profile.
-
-  For production use this wants a cache in front of it and a request queue; neither is implemented here.
+- **Recovery from a rejected session is manual.** The cookie can only be replaced from a trusted IP — a browser, or `tools/get_li_at.py` on a local machine. A cloud host cannot refresh its own session, because `/uas/authenticate` is challenged from datacenter IPs. Automating this would require routing the server's traffic through a residential proxy.
 
 ---
 
@@ -229,8 +272,9 @@ Requests use `curl_cffi` with a Chrome TLS fingerprint, since LinkedIn returns H
 
 ```
 app/
-  main.py      FastAPI routes, error mapping, lifespan startup login
-  auth.py      LinkedIn session — mobile-API login, cookie auth, CSRF headers
+  main.py      FastAPI routes, error mapping, startup login + session validation
+  auth.py      LinkedIn session — cookie auth, mobile-API login, CSRF headers,
+               rejected-session tracking
   scraper.py   Voyager Dash API calls + public HTML fallback
   parser.py    Maps Dash entities to the response schema
   models.py    Pydantic response models
