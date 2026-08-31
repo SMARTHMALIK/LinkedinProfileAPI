@@ -7,11 +7,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import scraper, parser
+from app.auth import session
 from app.models import ProfileResponse
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    session.login()   # authenticate at startup using LINKEDIN_EMAIL / LINKEDIN_PASSWORD
     yield
 
 

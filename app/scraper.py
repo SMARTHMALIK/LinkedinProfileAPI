@@ -43,8 +43,10 @@ def _get(path: str, public_id: str = "", params: dict = None) -> dict | None:
         return None
 
     if resp.status_code == 401:
-        session.login()
+        session.relogin()
         sess = session.get_session()
+        headers = session.get_voyager_headers()
+        headers["Referer"] = referer
         resp = sess.get(url, headers=headers, params=params, timeout=15)
 
     if resp.status_code in (400, 403):
@@ -850,9 +852,7 @@ def _check_api_connectivity() -> dict | None:
 def fetch_all(url_or_id: str) -> dict:
     public_id = extract_public_id(url_or_id)
 
-    # All data comes from LinkedIn's public unauthenticated HTML.
-    # LinkedIn renders full JSON-LD (name, headline, about, location, experience,
-    # education, profilePicture) for SEO purposes — no cookies required.
+    # ── 1. Public HTML (unauthenticated) — always attempt for images + fallback ──
     try:
         public_html, ip_blocked = _get_public_html(public_id)
     except Exception as exc:
@@ -864,25 +864,47 @@ def fetch_all(url_or_id: str) -> dict:
     for k, v in _extract_from_json_ld(public_html).items():
         if v and k not in html_data:
             html_data[k] = v
-
     print(f"[DEBUG] html_data keys: {list(html_data.keys())}")
 
-    has_data = any(html_data.get(k) for k in ("name", "headline", "profilePicture"))
+    # ── 2. Voyager API (authenticated) — full experience/education/skills/languages ──
+    classic = None
+    profile_view = None
+
+    if session.is_authenticated():
+        print(f"[DEBUG] Authenticated — fetching via Voyager API")
+        classic = _get_classic_profile(public_id)
+        if classic is None:
+            # 401/redirect means session expired — try re-login once
+            if session.relogin():
+                classic = _get_classic_profile(public_id)
+        if classic:
+            profile_view = _get_profile_view(public_id)
+            print(f"[DEBUG] profileView obtained: {bool(profile_view)}")
+    else:
+        print(f"[DEBUG] Not authenticated — Voyager API skipped")
+
+    # ── 3. Determine if we have enough data to return ──
+    has_data = any([
+        classic,
+        html_data.get("name"),
+        html_data.get("headline"),
+        html_data.get("profilePicture"),
+    ])
+
     if not has_data:
         if ip_blocked:
             raise RuntimeError(
                 "LinkedIn returned HTTP 999 — this server's IP is blocked by LinkedIn. "
-                "Try running the API locally from a residential IP."
+                "Set HTTPS_PROXY to a residential proxy URL to bypass this, or supply "
+                "LINKEDIN_EMAIL + LINKEDIN_PASSWORD so the API authenticates before fetching."
             )
-        raise LookupError(
-            f"Profile '{public_id}' not found or is private."
-        )
+        raise LookupError(f"Profile '{public_id}' not found or is private.")
 
     return {
         "publicIdentifier": public_id,
         "htmlData": html_data,
-        "classicProfile": {},
-        "profileView": {},
+        "classicProfile": classic or {},
+        "profileView": profile_view or {},
         "dashProfile": {},
         "skills": {},
         "languages": {},
