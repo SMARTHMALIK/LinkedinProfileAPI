@@ -22,11 +22,6 @@ class LinkedInSession:
 
     def login(self) -> requests.Session:
         li_at = os.getenv("LINKEDIN_LI_AT")
-        if not li_at:
-            raise EnvironmentError(
-                "LINKEDIN_LI_AT must be set in your .env file. "
-                "See README for how to extract it from your browser."
-            )
 
         # JSESSIONID doubles as the CSRF token for all Voyager API calls.
         # If provided in .env, we skip any warm-up web request (avoids proxy issues).
@@ -36,6 +31,14 @@ class LinkedInSession:
         sess.headers.update(HEADERS)
         sess.verify = False
         sess.max_redirects = 5
+
+        # The cookie is optional. Every per-request code path uses unauthenticated
+        # public HTML, so the API works fine without it — li_at only adds the
+        # background image for the profile the cookie itself belongs to.
+        if not li_at:
+            print("[DEBUG] LINKEDIN_LI_AT not set — running unauthenticated (public HTML only).")
+            self._session = sess
+            return sess
 
         sess.cookies.set("li_at", li_at, domain=".linkedin.com", path="/")
 

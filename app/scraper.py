@@ -78,65 +78,103 @@ _PUBLIC_HEADERS = {
 }
 
 
-def _try_fetch_html(url: str, label: str, extra_headers: dict = None) -> str:
-    """Shared fetch logic: tries curl_cffi (chrome120) first, then requests fallback."""
+def _try_fetch_html(url: str, label: str, extra_headers: dict = None) -> tuple[str, int]:
+    """
+    Shared fetch logic: tries curl_cffi (chrome120) first, then requests fallback.
+    Returns (html, last_status). Status 999 means LinkedIn blocked the server's IP.
+    Never raises — all exceptions are caught and logged.
+
+    curl_cffi follows redirects (needed for the 1-hop HTTP→HTTPS redirect on public
+    profiles). The requests fallback caps at 2 redirects; TooManyRedirects from
+    private profiles is caught and treated as "no data" (302 status returned).
+    """
     headers = dict(_PUBLIC_HEADERS)
     if extra_headers:
         headers.update(extra_headers)
     html = ""
+    last_status = 0
 
     try:
         from curl_cffi import requests as _curl
         for impersonate in ("chrome120", "chrome110", "safari15_5"):
             try:
-                resp = _curl.get(url, headers=headers, impersonate=impersonate, timeout=15)
+                resp = _curl.get(
+                    url, headers=headers, impersonate=impersonate,
+                    timeout=15, allow_redirects=True,
+                )
+                last_status = resp.status_code
                 print(f"[DEBUG] {label} ({impersonate}): status={resp.status_code}")
                 if resp.status_code == 200:
                     html = resp.text
                     break
                 if resp.status_code != 999:
                     break
-            except Exception:
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as _e:
+                # curl_cffi's TooManyRedirects may not subclass Exception in all
+                # versions, so we use BaseException to guarantee it's caught.
+                print(f"[DEBUG] {label} ({impersonate}): {type(_e).__name__}: {_e}")
+                if "redirect" in str(_e).lower():
+                    last_status = 302
+                    break  # redirect chain — no point trying other impersonates
                 continue
     except ImportError:
         pass
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:
+        print(f"[DEBUG] {label} curl_cffi outer error: {type(exc).__name__}: {exc}")
 
     if not html:
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         try:
-            resp = _requests.get(url, headers=headers, verify=False, timeout=15, allow_redirects=True)
+            with _requests.Session() as _tmp:
+                _tmp.verify = False
+                _tmp.max_redirects = 2
+                resp = _tmp.get(url, headers=headers, timeout=15, allow_redirects=True)
+            last_status = resp.status_code
             print(f"[DEBUG] {label} (requests): status={resp.status_code}")
             if resp.status_code == 200:
                 html = resp.text
+        except _requests.exceptions.TooManyRedirects:
+            print(f"[DEBUG] {label} → redirect chain (private/deleted profile)")
+            last_status = 302
         except Exception as exc:
-            print(f"[DEBUG] {label} error: {exc}")
+            print(f"[DEBUG] {label} requests error: {exc}")
 
-    return html
+    return html, last_status
 
 
-def _get_public_html(public_id: str) -> str:
+def _get_public_html(public_id: str) -> tuple[str, bool]:
     """
     Fetch LinkedIn profile HTML without authentication. Tries three URLs:
-    1. Main site  2. Mobile-lite site (different bot rules)
+    1. Main site  2. Mobile-lite site (different bot rules)  3. Legacy /pub/
     LinkedIn renders full JSON-LD for unauthenticated requests for SEO purposes.
+
+    Returns (html, ip_blocked). ip_blocked is True when LinkedIn answered 999 —
+    that means the server's IP is blocked, not that the profile is missing.
     """
+    saw_999 = False
     for url, label in [
         (f"https://www.linkedin.com/in/{public_id}/", "Main public HTML"),
         (f"https://www.linkedin.com/mwlite/in/{public_id}/", "mwlite HTML"),
         (f"https://www.linkedin.com/pub/{public_id}/en/", "pub HTML"),
     ]:
-        html = _try_fetch_html(url, label)
+        html, status = _try_fetch_html(url, label)
+        if status == 999:
+            saw_999 = True
         if html:
             has_headline = bool(re.search(r'"headline"\s*:\s*"[^"]{3,}"', html))
             has_ld = "<script type=\"application/ld+json\">" in html
             print(f"[DEBUG] {label} — headline JSON: {has_headline}, JSON-LD: {has_ld}")
             if has_headline or has_ld:
-                return html
+                return html, False
             print(f"[DEBUG] {label} returned but no usable profile data (bot-wall?)")
 
-    print("[DEBUG] All public HTML attempts blocked (999 / no data)")
-    return ""
+    print(f"[DEBUG] All public HTML attempts failed (ip_blocked={saw_999})")
+    return "", saw_999
 
 
 def _get_profile_html(public_id: str) -> str:
@@ -790,42 +828,32 @@ def _check_api_connectivity() -> dict | None:
 def fetch_all(url_or_id: str) -> dict:
     public_id = extract_public_id(url_or_id)
 
-    # ── Step 1: Public HTML (no cookies, stable, good for deployment) ──────────
-    # LinkedIn serves a fully server-rendered page to unauthenticated requests
-    # containing JSON-LD with name, headline, about, location, experience, education.
-    # This does NOT require queryIds that change with every LinkedIn deployment.
-    public_html = _get_public_html(public_id)
-    json_ld_data = _extract_from_json_ld(public_html)
-    public_html_data = _extract_from_html(public_html)
+    # All data comes from LinkedIn's public unauthenticated HTML.
+    # LinkedIn renders full JSON-LD (name, headline, about, location, experience,
+    # education, profilePicture) for SEO purposes — no cookies required.
+    try:
+        public_html, ip_blocked = _get_public_html(public_id)
+    except Exception as exc:
+        print(f"[DEBUG] public HTML fetch error: {exc}")
+        public_html, ip_blocked = "", False
 
-    # Merge JSON-LD and HTML extractions (JSON-LD wins for structured fields)
     html_data: dict = {}
-    html_data.update(public_html_data)
-    for k, v in json_ld_data.items():
+    html_data.update(_extract_from_html(public_html))
+    for k, v in _extract_from_json_ld(public_html).items():
         if v and k not in html_data:
             html_data[k] = v
-    print(f"[DEBUG] html_data after public fetch: {list(html_data.keys())}")
-
-    # ── Step 2: Use /me data from startup cache (never re-fetched per-request) ──
-    # Calling /me per-request from a cloud IP (GCP/Render) causes LinkedIn to
-    # detect the IP mismatch and invalidate the li_at cookie after ~2 uses.
-    # The cache is populated once at startup; all subsequent requests are cookie-free.
-    if _me_cache:
-        me_fields = _extract_from_me(_me_cache, public_id)
-        for k, v in me_fields.items():
-            if v and k not in html_data:
-                html_data[k] = v
-
-    dash_profile = None
 
     print(f"[DEBUG] html_data keys: {list(html_data.keys())}")
 
-    # Succeed if we have at least a name, headline, or profile picture
     has_data = any(html_data.get(k) for k in ("name", "headline", "profilePicture"))
     if not has_data:
+        if ip_blocked:
+            raise RuntimeError(
+                "LinkedIn returned HTTP 999 — this server's IP is blocked by LinkedIn. "
+                "Try running the API locally from a residential IP."
+            )
         raise LookupError(
-            f"Profile '{public_id}' not found or is private. "
-            "Make sure the profile is public."
+            f"Profile '{public_id}' not found or is private."
         )
 
     return {
@@ -833,7 +861,7 @@ def fetch_all(url_or_id: str) -> dict:
         "htmlData": html_data,
         "classicProfile": {},
         "profileView": {},
-        "dashProfile": dash_profile or {},
+        "dashProfile": {},
         "skills": {},
         "languages": {},
     }

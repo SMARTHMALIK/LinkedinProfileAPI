@@ -7,21 +7,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import scraper, parser
-from app.auth import session
 from app.models import ProfileResponse
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Warm up LinkedIn session at startup so the first request isn't slow."""
-    try:
-        session.login()
-        print("LinkedIn session established.")
-        # Call /me exactly once at startup and cache it.
-        # Never called per-request — avoids cookie invalidation from cloud IPs.
-        scraper.warm_me_cache()
-    except Exception as exc:
-        print(f"Warning: LinkedIn login failed at startup: {exc}")
     yield
 
 
@@ -29,7 +19,7 @@ app = FastAPI(
     title="LinkedIn Profile API",
     description=(
         "Accepts a LinkedIn profile URL and returns structured profile data "
-        "by calling LinkedIn's internal Voyager API."
+        "extracted from LinkedIn's public HTML."
     ),
     version="1.0.0",
     lifespan=lifespan,
@@ -53,7 +43,6 @@ def index():
 
 @app.get("/health", tags=["Meta"])
 def health():
-    """Simple liveness check."""
     return {"status": "ok"}
 
 
@@ -65,14 +54,13 @@ def health():
     responses={
         400: {"description": "Invalid or unparseable LinkedIn URL"},
         404: {"description": "Profile not found or private"},
-        429: {"description": "LinkedIn rate limit reached"},
-        503: {"description": "LinkedIn authentication failure"},
+        429: {"description": "LinkedIn blocked this server's IP (HTTP 999)"},
     },
 )
 def get_profile(
     url: str = Query(
         ...,
-        description="LinkedIn profile URL (e.g. https://www.linkedin.com/in/john-doe) or bare slug (john-doe)",
+        description="LinkedIn profile URL (e.g. https://www.linkedin.com/in/john-doe) or bare slug",
         examples=["https://www.linkedin.com/in/john-doe"],
     )
 ):
@@ -87,11 +75,11 @@ def get_profile(
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
-    except PermissionError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-
     except RuntimeError as exc:
         raise HTTPException(status_code=429, detail=str(exc))
 
     except Exception as exc:
+        msg = str(exc).lower()
+        if "redirect" in msg:
+            raise HTTPException(status_code=404, detail="Profile not found or is private.")
         raise HTTPException(status_code=500, detail=f"Unexpected error: {exc}")

@@ -9,6 +9,7 @@ class ExperienceItem(BaseModel):
     startDate: Optional[str] = None
     endDate: Optional[str] = None
     isCurrent: bool = False
+    description: Optional[str] = None
 
     @field_validator("isCurrent", mode="before")
     @classmethod
@@ -16,7 +17,6 @@ class ExperienceItem(BaseModel):
         if v is None:
             return False
         return v
-    description: Optional[str] = None
 
 
 class EducationItem(BaseModel):
