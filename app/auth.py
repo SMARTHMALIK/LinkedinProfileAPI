@@ -34,35 +34,28 @@ class LinkedInSession:
         sess.max_redirects = 5
         self._session = sess
 
-        # Priority 1: programmatic login with email + password
-        if email and password:
-            print(f"[DEBUG] Logging in with LINKEDIN_EMAIL ({email[:4]}...)")
-            if self._login_with_credentials(sess, email, password):
-                return sess
-            print("[DEBUG] Credential login failed — falling back to cookie env vars")
-
-        # Priority 2: manual li_at cookie from env
+        # Priority 1: a pre-obtained session cookie.
+        # Preferred on cloud hosts: LinkedIn issues a device challenge for logins
+        # from datacenter IPs, and repeated failed attempts can flag the account.
+        # Generate these locally with `python tools/get_li_at.py`.
         if li_at:
             sess.cookies.set("li_at", li_at, domain=".linkedin.com", path="/")
             if jsessionid:
                 sess.cookies.set("JSESSIONID", jsessionid, domain=".linkedin.com", path="/")
-                print(f"[DEBUG] Using manual li_at + JSESSIONID from env")
+                print("[DEBUG] Using li_at + JSESSIONID from env")
             else:
-                try:
-                    resp = sess.get(
-                        "https://www.linkedin.com/feed/",
-                        allow_redirects=True,
-                        timeout=10,
-                    )
-                    jsid = sess.cookies.get("JSESSIONID", "")
-                    print(f"[DEBUG] Warm-up: status={resp.status_code}, JSESSIONID={jsid!r}")
-                except requests.exceptions.TooManyRedirects:
-                    print("[DEBUG] Warm-up redirect loop")
-                except Exception as exc:
-                    print(f"[DEBUG] Warm-up error: {exc}")
+                print("[DEBUG] Using li_at from env (no JSESSIONID — Voyager calls may 403)")
             return sess
 
-        print("[DEBUG] No credentials configured — running unauthenticated (public HTML only).")
+        # Priority 2: programmatic login with email + password.
+        # Works from residential IPs; datacenter IPs usually get a CHALLENGE.
+        if email and password:
+            print(f"[DEBUG] Logging in with LINKEDIN_EMAIL ({email[:4]}...)")
+            if self._login_with_credentials(sess, email, password):
+                return sess
+            print("[DEBUG] Credential login failed.")
+
+        print("[DEBUG] No usable credentials — running unauthenticated (public HTML only).")
         return sess
 
     # Mobile app headers — LinkedIn's /uas/authenticate is the programmatic login
