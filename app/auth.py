@@ -65,95 +65,86 @@ class LinkedInSession:
         print("[DEBUG] No credentials configured — running unauthenticated (public HTML only).")
         return sess
 
+    # Mobile app headers — LinkedIn's /uas/authenticate is the programmatic login
+    # endpoint used by the Android/iOS apps. It accepts JSESSIONID (from the GET)
+    # as the CSRF token instead of the React-rendered loginCsrfParam on the web form.
+    _MOBILE_HEADERS = {
+        "X-Li-User-Agent": (
+            "LIAuthLibrary:3.2.4 com.linkedin.android:4.1.854 "
+            "Asus_ASUS_Z01QD:android_9"
+        ),
+        "User-Agent": "ANDROID OS",
+        "X-User-Language": "en",
+        "X-User-Locale": "en_US",
+        "Accept-Language": "en-us",
+        "X-Li-Track": (
+            '{"clientVersion":"4.1.854","clientMinorVersion":"854",'
+            '"osName":"Android OS","osVersion":"android_9",'
+            '"model":"Asus_ASUS_Z01QD","displayDensity":"2.0",'
+            '"displayWidth":"1080","displayHeight":"1920",'
+            '"targetSdkVersion":"28","buildId":"PPR1.180610.011"}'
+        ),
+    }
+
     def _login_with_credentials(self, sess: requests.Session, email: str, password: str) -> bool:
         """
-        POST email+password to LinkedIn's login form.
-        Uses curl_cffi with Chrome impersonation so LinkedIn serves the real login
-        page (not a bot-wall) even from datacenter IPs. Returns True on success.
+        Authenticate via LinkedIn's mobile API endpoint (/uas/authenticate).
+        This is the same flow used by the LinkedIn Android/iOS apps — no browser
+        CSRF token required. Works from datacenter IPs where the web form is blocked.
         """
+        _AUTH_URL = "https://www.linkedin.com/uas/authenticate"
         try:
-            from curl_cffi.requests import Session as _CurlSess
-            curl_sess = _CurlSess(impersonate="chrome120")
-            use_curl = True
-        except ImportError:
-            curl_sess = None
-            use_curl = False
-
-        _get = curl_sess.get if use_curl else sess.get
-        _post = curl_sess.post if use_curl else sess.post
-
-        try:
-            # Step 1: GET login page for CSRF token
-            resp = _get(
-                "https://www.linkedin.com/login",
-                headers={
-                    "Referer": "https://www.linkedin.com/",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9",
-                },
+            # Step 1: GET to obtain a fresh JSESSIONID (used as CSRF in the POST)
+            resp = sess.get(
+                _AUTH_URL,
+                headers=self._MOBILE_HEADERS,
                 timeout=15,
             )
-            print(f"[DEBUG] Login page GET: {resp.status_code} (curl_cffi={use_curl})")
+            print(f"[DEBUG] /uas/authenticate GET: {resp.status_code}")
 
-            # Try multiple patterns — LinkedIn has changed this field across versions
-            csrf_match = (
-                re.search(r'name=["\']loginCsrfParam["\'][^>]*value=["\']([^"\']+)["\']', resp.text)
-                or re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']loginCsrfParam["\']', resp.text)
-                or re.search(r'"loginCsrfParam"\s*[,:\s]*"([^"]+)"', resp.text)
-                or re.search(r'loginCsrfParam[^"\']*["\']([a-zA-Z0-9_\-]{8,})["\']', resp.text)
-            )
-            if not csrf_match:
-                print(f"[DEBUG] loginCsrfParam not found. Page snippet: {resp.text[:800]!r}")
+            jsid = sess.cookies.get("JSESSIONID", "")
+            if not jsid:
+                print(f"[DEBUG] No JSESSIONID from GET — body: {resp.text[:300]!r}")
                 return False
-            csrf_token = csrf_match.group(1)
-            print(f"[DEBUG] CSRF token found: {csrf_token[:12]}...")
+            print(f"[DEBUG] JSESSIONID obtained: {jsid[:20]}...")
 
-            # Step 2: POST credentials
-            resp = _post(
-                "https://www.linkedin.com/checkpoint/lg/login-submit",
+            # Step 2: POST credentials with JSESSIONID as the CSRF token
+            resp = sess.post(
+                _AUTH_URL,
                 data={
                     "session_key": email,
                     "session_password": password,
-                    "loginCsrfParam": csrf_token,
-                    "trk": "guest_homepage-basic_sign_in-button",
-                    "_d": "d",
+                    "JSESSIONID": jsid,
                 },
                 headers={
-                    "Referer": "https://www.linkedin.com/login",
+                    **self._MOBILE_HEADERS,
                     "Content-Type": "application/x-www-form-urlencoded",
-                    "Origin": "https://www.linkedin.com",
                 },
                 timeout=15,
             )
-            print(f"[DEBUG] Login POST: status={resp.status_code}, url={str(resp.url)[:80]}")
+            print(f"[DEBUG] /uas/authenticate POST: {resp.status_code}")
 
-            # Extract li_at from whichever session has it
-            if use_curl:
-                li_at = curl_sess.cookies.get("li_at", "")
-                jsid = curl_sess.cookies.get("JSESSIONID", "")
-            else:
-                li_at = sess.cookies.get("li_at", "")
-                jsid = sess.cookies.get("JSESSIONID", "")
-
-            print(f"[DEBUG] Cookies: li_at={'yes' if li_at else 'NO'}, JSESSIONID={'yes' if jsid else 'NO'}")
+            li_at = sess.cookies.get("li_at", "")
+            new_jsid = sess.cookies.get("JSESSIONID", jsid)
+            print(f"[DEBUG] Cookies: li_at={'yes' if li_at else 'NO'}, JSESSIONID={'yes' if new_jsid else 'NO'}")
 
             if li_at:
-                # Transfer cookies to the long-lived requests session used by Voyager API
-                sess.cookies.set("li_at", li_at, domain=".linkedin.com", path="/")
-                if jsid:
-                    sess.cookies.set("JSESSIONID", jsid, domain=".linkedin.com", path="/")
                 print("[DEBUG] Login successful!")
                 return True
 
-            url_str = str(resp.url)
-            if any(k in url_str for k in ("checkpoint", "challenge", "verification", "security")):
-                print(f"[DEBUG] Security challenge triggered: {url_str}")
-                print("[DEBUG] Go to LinkedIn in a browser, approve the login from this IP, then redeploy.")
-                return False
-
-            print(f"[DEBUG] Login failed — no li_at. Snippet: {resp.text[:400]!r}")
+            # Check response body for error hints
+            try:
+                body = resp.json()
+                print(f"[DEBUG] Login response JSON: {body}")
+                if body.get("status") == "CHALLENGE":
+                    print("[DEBUG] LinkedIn sent a security challenge — check your email/phone for verification.")
+            except Exception:
+                print(f"[DEBUG] Login response (non-JSON): {resp.text[:300]!r}")
             return False
 
+        except requests.exceptions.TooManyRedirects:
+            print("[DEBUG] Login redirect loop")
+            return False
         except Exception as exc:
             print(f"[DEBUG] Login error: {type(exc).__name__}: {exc}")
             return False
