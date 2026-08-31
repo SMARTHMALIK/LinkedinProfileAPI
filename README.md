@@ -1,42 +1,54 @@
 # LinkedIn Profile API
 
-A FastAPI server that accepts a LinkedIn profile URL and returns structured JSON profile data using pure HTTP calls to LinkedIn's internal endpoints
+A FastAPI service that accepts a LinkedIn profile URL and returns structured JSON profile data. Purely reverse-engineered — it makes direct HTTP calls to LinkedIn's internal endpoints. **No browser, no headless Chrome, no Selenium/Playwright at any point.**
+
+**Live:** https://linkedinprofileapi-xtu8.onrender.com/
+**Docs:** https://linkedinprofileapi-xtu8.onrender.com/docs
 
 ---
-## Deployed Link:
-https://linkedinprofileapi-xtu8.onrender.com/
 
-## Setup Instructions
+## Setup
 
 ### 1. Clone and install
 
 ```bash
 git clone https://github.com/SMARTHMALIK/LinkedinProfileAPI.git
 cd LinkedinProfileAPI
+python -m venv venv
+venv\Scripts\activate          # Windows
+source venv/bin/activate       # macOS / Linux
 pip install -r requirements.txt
 ```
 
-### 2. Extract LinkedIn cookies
-
-You need a LinkedIn account. After logging in:
-
-1. Open Chrome → go to `https://www.linkedin.com`
-2. Open **DevTools** (`F12`) → **Application** → **Cookies** → `https://www.linkedin.com`
-3. Copy the value of `li_at`
-4. Copy the value of `JSESSIONID` (looks like `ajax:1234567890123456789`)
-
-### 3. Configure environment
+### 2. Configure credentials
 
 ```bash
 cp .env.example .env
 ```
 
-Fill in `.env`:
+Fill in your LinkedIn account credentials:
 
 ```
-LINKEDIN_LI_AT=your_li_at_value_here
-LINKEDIN_JSESSIONID=ajax:your_jsessionid_here
+LINKEDIN_EMAIL=you@example.com
+LINKEDIN_PASSWORD=your_password
 ```
+
+### 3. Generate a session cookie
+
+LinkedIn issues a **device challenge** for logins coming from datacenter IPs, so email/password alone will not authenticate once deployed to a cloud host. Run this from your own machine — your home/office IP is already trusted, so it authenticates cleanly:
+
+```bash
+python tools/get_li_at.py
+```
+
+It prints two values:
+
+```
+LINKEDIN_LI_AT=AQEDAW0-7vsBrkGQAAAB...
+LINKEDIN_JSESSIONID="ajax:9170211800230432869"
+```
+
+Add both to your `.env` for local use, and to your host's environment variables for deployment. Keep `LINKEDIN_EMAIL` / `LINKEDIN_PASSWORD` set too — they are the automatic refresh path when the cookie expires.
 
 ### 4. Run
 
@@ -44,7 +56,7 @@ LINKEDIN_JSESSIONID=ajax:your_jsessionid_here
 uvicorn app.main:app --reload
 ```
 
-Open `http://localhost:8000/docs` to use the interactive Swagger UI.
+Open http://localhost:8000/docs for the interactive Swagger UI.
 
 ---
 
@@ -54,37 +66,35 @@ Open `http://localhost:8000/docs` to use the interactive Swagger UI.
 
 Fetch a LinkedIn profile by URL or vanity slug.
 
-**Query parameter:**
-
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `url` | string | Yes | Full LinkedIn profile URL or bare slug (e.g. `john-doe`) |
+| `url` | string | Yes | Full profile URL or bare slug (e.g. `satyanadella`) |
 
-**Example request:**
+**Request**
 
 ```
-GET /profile?url=https://www.linkedin.com/in/john-doe
+GET /profile?url=https://www.linkedin.com/in/satyanadella/
 ```
 
-**Example response:**
+**Response** `200 OK`
 
 ```json
 {
-  "publicIdentifier": "john-doe",
-  "name": "John Doe",
-  "headline": "Software Engineer at Google",
-  "location": "San Francisco, CA",
-  "about": "Passionate about building scalable systems...",
+  "publicIdentifier": "satyanadella",
+  "name": "Satya Nadella",
+  "headline": "Chairman and CEO at Microsoft",
+  "location": "United States",
+  "about": "As chairman and CEO of Microsoft, I define my mission and that of my company as empowering every person and every organization on the planet to achieve more.",
   "connections": null,
   "followers": null,
-  "profilePicture": "https://media.licdn.com/dms/image/...",
-  "backgroundImage": "https://media.licdn.com/dms/image/...",
+  "profilePicture": "https://media.licdn.com/dms/image/v2/C5603AQHHUuOSlRVA1w/...",
+  "backgroundImage": "https://media.licdn.com/dms/image/v2/D5616AQFVwYcBLAcPqQ/...",
   "experience": [
     {
-      "title": "Software Engineer",
-      "company": "Google",
-      "location": "Mountain View, CA",
-      "startDate": "2021-06",
+      "title": "Chairman and CEO",
+      "company": "Microsoft",
+      "location": "Greater Seattle Area",
+      "startDate": "2014-02",
       "endDate": null,
       "isCurrent": true,
       "description": null
@@ -92,11 +102,11 @@ GET /profile?url=https://www.linkedin.com/in/john-doe
   ],
   "education": [
     {
-      "school": "MIT",
-      "degree": "B.S.",
-      "fieldOfStudy": "Computer Science",
-      "startDate": "2017-08",
-      "endDate": "2021-05",
+      "school": "Manipal Institute of Technology, Manipal",
+      "degree": "Bachelor's Degree",
+      "fieldOfStudy": "Electrical Engineering",
+      "startDate": null,
+      "endDate": null,
       "grade": null,
       "description": null
     }
@@ -107,14 +117,29 @@ GET /profile?url=https://www.linkedin.com/in/john-doe
 }
 ```
 
-**Error responses:**
+**Error responses**
 
 | Status | Meaning |
 |--------|---------|
 | `400` | Invalid or unparseable LinkedIn URL |
 | `404` | Profile not found or is private |
-| `429` | LinkedIn rate limit reached |
-| `503` | LinkedIn session expired (re-extract `li_at`) |
+| `429` | LinkedIn blocked this server's IP (HTTP 999) and no session was available |
+
+### `GET /auth/status`
+
+Reports whether the backend LinkedIn session is active.
+
+```json
+{ "authenticated": true, "mode": "voyager-api" }
+```
+
+### `POST /auth/retry`
+
+Re-runs the login without redeploying. Useful after refreshing credentials or approving a device challenge.
+
+```json
+{ "login_succeeded": true, "authenticated": true }
+```
 
 ### `GET /health`
 
@@ -122,37 +147,88 @@ Liveness check. Returns `{"status": "ok"}`.
 
 ### `GET /docs`
 
-Interactive Swagger UI with live request testing.
+Interactive Swagger UI.
 
 ---
 
 ## Approach
 
-This API is a purely reverse-engineered solution that directly hits LinkedIn's endpoints using Python `requests` — no browser is launched at any point.
+### Authentication
 
-**Data is collected from three sources:**
+LinkedIn's web login page is a React SPA — the `loginCsrfParam` hidden field is injected by JavaScript and is therefore invisible to plain HTTP requests. Instead, this project authenticates through **`/uas/authenticate`**, the endpoint used by the LinkedIn Android and iOS apps. It takes the `JSESSIONID` from an initial GET as its own CSRF token, so no browser-rendered form is needed:
 
-**1. Public HTML (primary)**
-LinkedIn renders complete profile data server-side for unauthenticated requests so that search engines (Google, Bing) can index public profiles. We fetch `https://www.linkedin.com/in/{id}/` without any cookies and extract the `<script type="application/ld+json">` blocks embedded in the HTML. These contain name, headline, location, about, experience (with company names), education (with school names), and profile picture — all structured as schema.org `Person` objects.
+```
+GET  /uas/authenticate                       → JSESSIONID cookie
+POST /uas/authenticate                       → li_at cookie
+     session_key, session_password, JSESSIONID
+```
 
-**2. Authenticated HTML (secondary)**
-A logged-in page visit using the `li_at` session cookie. Even though LinkedIn's authenticated profile page is a Single Page Application (no server-rendered data), the initial HTML shell contains pre-rendered image tags with profile picture and background image URLs, as well as the user's internal URN (`urn:li:fsd_profile:...`). This visit also refreshes the `JSESSIONID` cookie needed for API calls.
+Requests carry the LinkedIn Android client's `X-Li-User-Agent` and `X-Li-Track` headers.
 
-**3. Voyager API (tertiary)**
-LinkedIn's internal REST API at `/voyager/api/` — the same API the LinkedIn web app uses. Called with `li_at` + `JSESSIONID` cookies and the `csrf-token` header. Used for:
-- `/voyager/api/me` — verifies session health
-- `/voyager/api/typeahead/hitsV2` — fallback for name and headline via search
+`JSESSIONID` doubles as the CSRF token for every subsequent API call and must be sent as the `csrf-token` header with the surrounding quotes stripped but the `ajax:` prefix intact.
 
-**Session management:**
-The `li_at` cookie is a long-lived LinkedIn session token. `JSESSIONID` doubles as the CSRF token and must be passed as both a cookie and `csrf-token` header (including the `ajax:` prefix). The server warms up the session at startup by visiting LinkedIn's feed page.
+### Data retrieval — Voyager Dash API
+
+LinkedIn **retired** the classic REST endpoints; `/voyager/api/identity/profiles/{id}` and `/profileView` now return **`410 Gone`**. The current API surface is the Dash namespace, which this project uses:
+
+| Data | Endpoint |
+|---|---|
+| Base profile | `/voyager/api/identity/dash/profiles?q=memberIdentity&memberIdentity={slug}` |
+| Experience | `/voyager/api/identity/dash/profilePositions?q=viewee&profileUrn={urn}` |
+| Education | `/voyager/api/identity/dash/profileEducations?q=viewee&profileUrn={urn}` |
+| Skills | `/voyager/api/identity/dash/profileSkills?q=viewee&profileUrn={urn}` |
+| Certifications | `/voyager/api/identity/dash/profileCertifications?q=viewee&profileUrn={urn}` |
+| Languages | `/voyager/api/identity/dash/profileLanguages?q=viewee&profileUrn={urn}` |
+
+The base profile call resolves the vanity slug to an internal URN (`urn:li:fsd_profile:ACoAA...`), which then keys every section request.
+
+Responses use LinkedIn's normalized JSON format — a `data` envelope plus a flat `included` array of typed entities. The parser filters `included` by `$type` suffix and maps each entity to the response schema, handling the `multiLocale*` field variants (`companyName` vs `multiLocaleCompanyName: {"en_US": ...}`) and resolving images by picking the widest artifact from the nested `displayImage.vectorImage.artifacts` array.
+
+### Public HTML fallback
+
+When no session is available, the service falls back to LinkedIn's unauthenticated public pages and parses the `<script type="application/ld+json">` schema.org `Person` block that LinkedIn renders for search-engine indexing. This yields name, headline, about, location and profile picture, but only company and school *names* for experience and education.
+
+This path is also consulted when authenticated to recover the full `"City, State, Country"` location string, which the Dash Profile entity does not expose.
+
+Requests use `curl_cffi` with a Chrome TLS fingerprint, since LinkedIn returns HTTP 999 to clients whose TLS handshake identifies them as a scripting library.
 
 ---
 
 ## Known Limitations
 
-- **`li_at` expiry** — The session cookie expires roughly every 12 months. Once expired, all authenticated API calls return 403 and must be re-extracted from the browser.
-- **IP rate limiting** — LinkedIn returns HTTP 999 (bot-blocked) when too many requests originate from the same IP in a short window. Local development IPs can be temporarily blocked after heavy testing. Deployed servers on cloud platforms (Render.com) use fresh IPs and are unaffected.
-- **Private profiles** — Only public LinkedIn profiles are supported. Profiles set to private return no data.
-- **Experience and education detail** — When public HTML is the only data source, experience entries contain company names only (no job titles or dates) and education entries contain school names only (no degree or field of study). This is a limitation of what LinkedIn embeds in its JSON-LD schema.
-- **Skills, certifications, languages** — These sections are not available in LinkedIn's public HTML. They require a working authenticated Voyager API response, which depends on LinkedIn's internal API stability.
-- **LinkedIn API changes** — LinkedIn's internal Voyager API endpoints . Classic REST endpoints (`/voyager/api/identity/profiles/`) were removed in 2025 (HTTP 410). The public HTML approach is the most stable fallback as it is driven by LinkedIn's SEO requirements.
+- **Datacenter IPs are blocked for unauthenticated requests.** LinkedIn returns HTTP 999 to cloud provider IP ranges (Render, AWS, GCP, Azure). This does not affect the authenticated Dash API, which is the primary data source — but it does mean the public-HTML fallback is unavailable when deployed, so `location` degrades to a country name. Setting `HTTPS_PROXY` to a residential proxy restores it.
+
+- **Cloud logins hit a device challenge.** Because of the above, `LINKEDIN_EMAIL` / `LINKEDIN_PASSWORD` alone cannot authenticate from a cloud host — LinkedIn responds `{"login_result": "CHALLENGE"}`. This is why `tools/get_li_at.py` exists: generate the session from a trusted IP and supply it as `LINKEDIN_LI_AT`.
+
+- **Session expiry.** `li_at` is long-lived but is invalidated if LinkedIn's risk engine flags the session. When Voyager calls start returning 401, the service attempts an automatic re-login; if that is challenged, re-run `tools/get_li_at.py` and update the environment variable.
+
+- **Visibility is scoped to the authenticated account.** The API returns what your LinkedIn account can see. Fields a member has restricted, or sections only visible to 1st-degree connections, come back empty. Skills, certifications and languages are commonly restricted this way — the endpoints return `200` with an empty `included` array rather than an error.
+
+- **Private profiles** return `404`.
+
+- **No `connections` / `followers` counts.** These are not present on the Dash Profile entity and would require additional network-info calls.
+
+- **LinkedIn changes these endpoints without notice.** They are internal APIs with no stability guarantee — the `410 Gone` on the classic REST endpoints is exactly this happening. Endpoint paths may need revisiting if calls begin failing.
+
+- **Rate limiting.** Sustained high-volume querying from a single session will get throttled. This service performs six API calls per profile request and does no caching.
+
+---
+
+## Project Structure
+
+```
+app/
+  main.py      FastAPI routes, error mapping, lifespan startup login
+  auth.py      LinkedIn session — mobile-API login, cookie auth, CSRF headers
+  scraper.py   Voyager Dash API calls + public HTML fallback
+  parser.py    Maps Dash entities to the response schema
+  models.py    Pydantic response models
+tools/
+  get_li_at.py Generates a session cookie from a trusted IP
+static/
+  index.html   Minimal web UI
+```
+
+## Tech Stack
+
+FastAPI · Uvicorn · Pydantic v2 · requests · curl_cffi · python-dotenv
