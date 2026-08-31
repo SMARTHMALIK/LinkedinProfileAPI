@@ -78,6 +78,21 @@ _PUBLIC_HEADERS = {
 }
 
 
+def _get_proxies() -> dict | None:
+    """
+    Read a residential proxy from env vars (set HTTPS_PROXY on Render to bypass
+    LinkedIn's datacenter IP block). Supports HTTP/SOCKS5 proxy URLs.
+    Example: HTTPS_PROXY=http://user:pass@proxy.webshare.io:80
+    """
+    proxy = (
+        os.getenv("HTTPS_PROXY")
+        or os.getenv("https_proxy")
+        or os.getenv("HTTP_PROXY")
+        or os.getenv("http_proxy")
+    )
+    return {"http": proxy, "https": proxy} if proxy else None
+
+
 def _try_fetch_html(url: str, label: str, extra_headers: dict = None) -> tuple[str, int]:
     """
     Shared fetch logic: tries curl_cffi (chrome120) first, then requests fallback.
@@ -87,21 +102,26 @@ def _try_fetch_html(url: str, label: str, extra_headers: dict = None) -> tuple[s
     curl_cffi follows redirects (needed for the 1-hop HTTP→HTTPS redirect on public
     profiles). The requests fallback caps at 2 redirects; TooManyRedirects from
     private profiles is caught and treated as "no data" (302 status returned).
+    If HTTPS_PROXY is set, both libraries route through that proxy.
     """
     headers = dict(_PUBLIC_HEADERS)
     if extra_headers:
         headers.update(extra_headers)
     html = ""
     last_status = 0
+    proxies = _get_proxies()
 
     try:
         from curl_cffi import requests as _curl
         for impersonate in ("chrome120", "chrome110", "safari15_5"):
             try:
-                resp = _curl.get(
-                    url, headers=headers, impersonate=impersonate,
+                kwargs = dict(
+                    headers=headers, impersonate=impersonate,
                     timeout=15, allow_redirects=True,
                 )
+                if proxies:
+                    kwargs["proxies"] = proxies
+                resp = _curl.get(url, **kwargs)
                 last_status = resp.status_code
                 print(f"[DEBUG] {label} ({impersonate}): status={resp.status_code}")
                 if resp.status_code == 200:
@@ -133,6 +153,8 @@ def _try_fetch_html(url: str, label: str, extra_headers: dict = None) -> tuple[s
             with _requests.Session() as _tmp:
                 _tmp.verify = False
                 _tmp.max_redirects = 2
+                if proxies:
+                    _tmp.proxies.update(proxies)
                 resp = _tmp.get(url, headers=headers, timeout=15, allow_redirects=True)
             last_status = resp.status_code
             print(f"[DEBUG] {label} (requests): status={resp.status_code}")
