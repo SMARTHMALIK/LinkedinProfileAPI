@@ -1,5 +1,11 @@
 """
-Transforms raw LinkedIn Voyager API responses into our clean response schema.
+Transforms raw LinkedIn Voyager Dash API responses into our clean response schema.
+
+LinkedIn retired the classic /identity/profiles/{id} and /profileView endpoints
+(they now return 410 Gone). Everything here maps the current Dash entities:
+  com.linkedin.voyager.dash.identity.profile.{Profile,Position,Education,
+                                              Skill,Certification,Language}
+
 All parsing uses .get() throughout — missing fields silently become None/[].
 """
 
@@ -11,11 +17,36 @@ PROFICIENCY_MAP = {
     "NATIVE_OR_BILINGUAL": "Native or Bilingual",
 }
 
+# LinkedIn returns only an ISO country code on the Profile entity; the full
+# "City, State, Country" string lives in the public HTML. This covers the
+# common cases so an authenticated-only fetch still reports something useful.
+_COUNTRY_NAMES = {
+    "US": "United States", "IN": "India", "GB": "United Kingdom",
+    "CA": "Canada", "AU": "Australia", "DE": "Germany", "FR": "France",
+    "SG": "Singapore", "AE": "United Arab Emirates", "NL": "Netherlands",
+    "IE": "Ireland", "JP": "Japan", "CN": "China", "BR": "Brazil",
+}
+
 
 # ---------- helpers ----------
 
+def _localized(entity: dict, key: str) -> str | None:
+    """
+    Dash entities carry both a flat field and a multiLocale variant, e.g.
+    `companyName` and `multiLocaleCompanyName: {"en_US": "..."}`.
+    Prefer the flat value, fall back to any locale present.
+    """
+    val = entity.get(key)
+    if val:
+        return val
+    multi = entity.get("multiLocale" + key[0].upper() + key[1:])
+    if isinstance(multi, dict) and multi:
+        return multi.get("en_US") or next(iter(multi.values()), None)
+    return None
+
+
 def _format_date(date_obj: dict | None) -> str | None:
-    """Convert LinkedIn date dict {year, month} to 'YYYY-MM' or 'YYYY'."""
+    """Convert a Dash date {year, month} to 'YYYY-MM' or 'YYYY'."""
     if not date_obj:
         return None
     year = date_obj.get("year")
@@ -27,29 +58,25 @@ def _format_date(date_obj: dict | None) -> str | None:
     return None
 
 
-def _period_dates(time_period: dict | None) -> tuple[str | None, str | None]:
-    """Return (startDate, endDate) strings from a Voyager timePeriod object."""
-    if not time_period:
-        return None, None
-    return (
-        _format_date(time_period.get("startDate")),
-        _format_date(time_period.get("endDate")),
-    )
+def _date_range(entity: dict) -> tuple[str | None, str | None]:
+    """Return (startDate, endDate) from a Dash dateRange object."""
+    dr = entity.get("dateRange") or {}
+    return _format_date(dr.get("start")), _format_date(dr.get("end"))
 
 
 def _best_image_url(image_block: dict | None) -> str | None:
     """
-    Resolve a Voyager vectorImage block to a URL.
-    Picks the largest artifact by width.
-    Handles both direct vectorImage dicts and displayImageReference wrappers.
+    Resolve a Dash image block to the highest-resolution URL.
+    Shape: {displayImage: {vectorImage: {rootUrl, artifacts: [{width, ...}]}}}
+    Also handles the bare vectorImage and displayImageReference wrappers.
     """
-    if not image_block:
+    if not isinstance(image_block, dict):
         return None
 
-    # unwrap displayImageReference if present
-    if "displayImageReference" in image_block:
-        image_block = image_block["displayImageReference"]
-    if "vectorImage" in image_block:
+    for key in ("displayImage", "displayImageReference", "vectorImage", "image"):
+        if key in image_block and isinstance(image_block[key], dict):
+            image_block = image_block[key]
+    if "vectorImage" in image_block and isinstance(image_block["vectorImage"], dict):
         image_block = image_block["vectorImage"]
 
     root = image_block.get("rootUrl", "")
@@ -64,188 +91,101 @@ def _best_image_url(image_block: dict | None) -> str | None:
 
 # ---------- section parsers ----------
 
-def _parse_experience(profile_view: dict) -> list:
-    positions = profile_view.get("positionView", {}).get("elements", [])
+def _parse_experience(positions: list) -> list:
     result = []
     for pos in positions:
-        start, end = _period_dates(pos.get("timePeriod"))
+        start, end = _date_range(pos)
         result.append({
-            "title": pos.get("title"),
-            "company": pos.get("companyName"),
-            "location": pos.get("locationName"),
+            "title": _localized(pos, "title"),
+            "company": _localized(pos, "companyName"),
+            "location": (
+                _localized(pos, "locationName")
+                or _localized(pos, "geoLocationName")
+            ),
             "startDate": start,
             "endDate": end,
             "isCurrent": end is None and start is not None,
-            "description": pos.get("description"),
+            "description": _localized(pos, "description"),
         })
     return result
 
 
-def _parse_education(profile_view: dict) -> list:
-    educations = profile_view.get("educationView", {}).get("elements", [])
+def _parse_education(educations: list) -> list:
     result = []
     for edu in educations:
-        start, end = _period_dates(edu.get("timePeriod"))
+        start, end = _date_range(edu)
         result.append({
-            "school": edu.get("schoolName"),
-            "degree": edu.get("degreeName"),
-            "fieldOfStudy": edu.get("fieldOfStudy"),
+            "school": _localized(edu, "schoolName"),
+            "degree": _localized(edu, "degreeName"),
+            "fieldOfStudy": _localized(edu, "fieldOfStudy"),
             "startDate": start,
             "endDate": end,
-            "grade": edu.get("grade"),
-            "description": edu.get("description"),
+            "grade": _localized(edu, "grade"),
+            "description": (
+                _localized(edu, "description")
+                or _localized(edu, "activities")
+            ),
         })
     return result
 
 
-def _parse_certifications(profile_view: dict) -> list:
-    certs = profile_view.get("certificationView", {}).get("elements", [])
+def _parse_certifications(certs: list) -> list:
     result = []
     for cert in certs:
-        start, end = _period_dates(cert.get("timePeriod"))
+        start, end = _date_range(cert)
         result.append({
-            "name": cert.get("name"),
-            "authority": cert.get("authority"),
+            "name": _localized(cert, "name"),
+            "authority": _localized(cert, "authority"),
             "issuedDate": start,
             "expiryDate": end,
-            "licenseNumber": cert.get("licenseNumber"),
+            "licenseNumber": _localized(cert, "licenseNumber"),
             "url": cert.get("url"),
         })
     return result
 
 
-def _parse_skills(skills_data: dict) -> list:
+def _parse_skills(skills: list) -> list:
     return [
         {
-            "name": s.get("name"),
-            "endorsements": s.get("endorsementCount", 0),
+            "name": _localized(s, "name"),
+            "endorsements": s.get("endorsementCount", 0) or 0,
         }
-        for s in skills_data.get("elements", [])
-        if s.get("name")
+        for s in skills
+        if _localized(s, "name")
     ]
 
 
-def _parse_languages(languages_data: dict) -> list:
-    return [
-        {
-            "name": lang.get("name"),
-            "proficiency": PROFICIENCY_MAP.get(
-                lang.get("proficiency", ""),
-                lang.get("proficiency"),  # fall back to raw value if unmapped
-            ),
-        }
-        for lang in languages_data.get("elements", [])
-        if lang.get("name")
-    ]
+def _parse_languages(languages: list) -> list:
+    out = []
+    for lang in languages:
+        name = _localized(lang, "name")
+        if not name:
+            continue
+        prof = lang.get("proficiency")
+        out.append({
+            "name": name,
+            "proficiency": PROFICIENCY_MAP.get(prof, prof),
+        })
+    return out
 
 
-# ---------- main entry point ----------
+# ---------- base profile ----------
 
-def _parse_experience_from_json_ld(raw: list) -> list:
-    """Parse worksFor list from JSON-LD (company names only — partial data)."""
-    result = []
-    for org in raw:
-        if isinstance(org, dict) and org.get("name"):
-            result.append({
-                "title": None,
-                "company": org.get("name"),
-                "location": None,
-                "startDate": None,
-                "endDate": None,
-                "isCurrent": None,
-                "description": None,
-            })
-    return result
-
-
-def _parse_education_from_json_ld(raw: list) -> list:
-    """Parse alumniOf list from JSON-LD (school names only — partial data)."""
-    result = []
-    for school in raw:
-        if isinstance(school, dict) and school.get("name"):
-            result.append({
-                "school": school.get("name"),
-                "degree": None,
-                "fieldOfStudy": None,
-                "startDate": None,
-                "endDate": None,
-                "grade": None,
-                "description": None,
-            })
-    return result
-
-
-def build_response(raw: dict) -> dict:
-    """
-    Transform the dict returned by scraper.fetch_all() into our clean response schema.
-    Priority order for each field: classic Voyager REST > GraphQL/Dash > HTML data.
-    Never raises — missing sections produce empty lists or None fields.
-    """
-    html_data = raw.get("htmlData", {})
-    classic = raw.get("classicProfile", {})
-    pv = raw.get("profileView", {})       # classic profileView (positionView, educationView, etc.)
-    dash = raw.get("dashProfile", {})
-
-    # profileView wraps base profile under "profile" key; extract it
-    pv_base = pv.get("profile", {}) if pv else {}
-
-    # GraphQL normalized JSON: extract Profile entity from 'included' list
-    if "included" in dash:
-        profile_entity = next(
-            (o for o in dash.get("included", []) if o.get("$type", "").endswith(".Profile")),
-            None,
-        )
-        dash_profile = profile_entity or {}
-    else:
-        dash_elements = dash.get("elements", [])
-        dash_profile = dash_elements[0] if dash_elements else {}
-
-    # For base fields (headline, location, about): classic profile > profileView base > dash > html
-    base_source = classic or pv_base or dash_profile
-    base = _parse_base(base_source, html_data)
-
-    # For sections: profileView has positionView/educationView/skillView/etc.
-    sections_source = pv if pv else dash_profile
-
-    # Experience: profileView > Dash > JSON-LD stub
-    experience = _parse_experience(sections_source)
-    if not experience:
-        experience = _parse_experience_from_json_ld(html_data.get("experience_raw", []))
-
-    # Education: profileView > Dash > JSON-LD stub
-    education = _parse_education(sections_source)
-    if not education:
-        education = _parse_education_from_json_ld(html_data.get("education_raw", []))
-
-    # Skills and languages live inside profileView as skillView/languageView
-    skills_src = pv.get("skillView", raw.get("skills", {})) if pv else raw.get("skills", {})
-    lang_src = pv.get("languageView", raw.get("languages", {})) if pv else raw.get("languages", {})
-
-    return {
-        "publicIdentifier": raw.get("publicIdentifier"),
-        **base,
-        "experience": experience,
-        "education": education,
-        "certifications": _parse_certifications(sections_source),
-        "skills": _parse_skills(skills_src),
-        "languages": _parse_languages(lang_src),
-    }
-
-
-def _parse_base(profile: dict, html_data: dict = None) -> dict:
-    html_data = html_data or {}
-    first = profile.get("firstName", "")
-    last = profile.get("lastName", "")
+def _parse_base(profile: dict, html_data: dict) -> dict:
+    first = profile.get("firstName") or ""
+    last = profile.get("lastName") or ""
     name = f"{first} {last}".strip() or html_data.get("name")
+
+    # Location: the Dash Profile only exposes an ISO country code, so prefer the
+    # richer "City, State, Country" string scraped from the public page.
+    country = (profile.get("location") or {}).get("countryCode")
+    location = html_data.get("location") or _COUNTRY_NAMES.get(country, country)
+
     return {
         "name": name,
-        "headline": profile.get("headline") or html_data.get("headline"),
-        "location": (
-            profile.get("locationName")
-            or profile.get("geoLocationName")
-            or html_data.get("location")
-        ),
-        "about": profile.get("summary") or html_data.get("about"),
+        "headline": _localized(profile, "headline") or html_data.get("headline"),
+        "location": location,
+        "about": _localized(profile, "summary") or html_data.get("about"),
         "connections": profile.get("connectionsCount"),
         "followers": profile.get("followersCount"),
         "profilePicture": (
@@ -254,8 +194,50 @@ def _parse_base(profile: dict, html_data: dict = None) -> dict:
         ),
         "backgroundImage": (
             _best_image_url(
-                profile.get("backgroundImage") or profile.get("backgroundPicture")
+                profile.get("backgroundPicture") or profile.get("backgroundImage")
             )
             or html_data.get("backgroundImage")
         ),
+    }
+
+
+# ---------- main entry point ----------
+
+def build_response(raw: dict) -> dict:
+    """
+    Transform the dict returned by scraper.fetch_all() into the response schema.
+    Authenticated Dash data takes priority; public-HTML values fill any gaps.
+    Never raises — missing sections produce empty lists or None fields.
+    """
+    profile = raw.get("dashProfile") or {}
+    html_data = raw.get("htmlData") or {}
+
+    experience = _parse_experience(raw.get("positions") or [])
+    education = _parse_education(raw.get("educations") or [])
+
+    # Unauthenticated fallback: JSON-LD only exposes company/school names.
+    if not experience:
+        experience = [
+            {"title": None, "company": org.get("name"), "location": None,
+             "startDate": None, "endDate": None, "isCurrent": False,
+             "description": None}
+            for org in html_data.get("experience_raw", [])
+            if isinstance(org, dict) and org.get("name")
+        ]
+    if not education:
+        education = [
+            {"school": s.get("name"), "degree": None, "fieldOfStudy": None,
+             "startDate": None, "endDate": None, "grade": None, "description": None}
+            for s in html_data.get("education_raw", [])
+            if isinstance(s, dict) and s.get("name")
+        ]
+
+    return {
+        "publicIdentifier": raw.get("publicIdentifier"),
+        **_parse_base(profile, html_data),
+        "experience": experience,
+        "education": education,
+        "certifications": _parse_certifications(raw.get("certifications") or []),
+        "skills": _parse_skills(raw.get("skills") or []),
+        "languages": _parse_languages(raw.get("languages") or []),
     }

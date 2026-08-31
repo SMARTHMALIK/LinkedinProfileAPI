@@ -132,14 +132,29 @@ class LinkedInSession:
                 print("[DEBUG] Login successful!")
                 return True
 
-            # Check response body for error hints
+            # Inspect the response for a challenge we can complete automatically
             try:
                 body = resp.json()
-                print(f"[DEBUG] Login response JSON: {body}")
-                if body.get("status") == "CHALLENGE":
-                    print("[DEBUG] LinkedIn sent a security challenge — check your email/phone for verification.")
             except Exception:
                 print(f"[DEBUG] Login response (non-JSON): {resp.text[:300]!r}")
+                return False
+
+            print(f"[DEBUG] Login response JSON: {body}")
+            result = body.get("login_result", "")
+
+            if result == "CHALLENGE":
+                challenge_url = body.get("challenge_url", "")
+                if challenge_url and self._follow_challenge(sess, challenge_url):
+                    return True
+                print(
+                    "[DEBUG] Challenge could not be completed automatically. "
+                    "This IP is untrusted by LinkedIn. Either set HTTPS_PROXY to a "
+                    "residential proxy, or run tools/get_li_at.py locally and set "
+                    "LINKEDIN_LI_AT + LINKEDIN_JSESSIONID as env vars."
+                )
+            elif result in ("BAD_PASSWORD", "INVALID_CREDENTIALS"):
+                print("[DEBUG] Credentials rejected — check LINKEDIN_EMAIL / LINKEDIN_PASSWORD.")
+
             return False
 
         except requests.exceptions.TooManyRedirects:
@@ -147,6 +162,55 @@ class LinkedInSession:
             return False
         except Exception as exc:
             print(f"[DEBUG] Login error: {type(exc).__name__}: {exc}")
+            return False
+
+    def _follow_challenge(self, sess: requests.Session, challenge_url: str) -> bool:
+        """
+        LinkedIn's 'direct-login-submit' challenge is a soft device check: following
+        the URL with the same session cookies can complete the login without a PIN.
+        Returns True if an li_at cookie was issued.
+        """
+        print(f"[DEBUG] Following challenge URL: {challenge_url[:110]}")
+        try:
+            resp = sess.get(
+                challenge_url,
+                headers={
+                    **self._MOBILE_HEADERS,
+                    "Referer": "https://www.linkedin.com/",
+                },
+                allow_redirects=True,
+                timeout=15,
+            )
+            print(f"[DEBUG] Challenge GET: {resp.status_code}, url={str(resp.url)[:100]}")
+
+            li_at = sess.cookies.get("li_at", "")
+            if li_at:
+                print("[DEBUG] Challenge cleared — li_at issued!")
+                return True
+
+            # Some variants need a POST back to the same endpoint
+            resp = sess.post(
+                challenge_url,
+                headers={
+                    **self._MOBILE_HEADERS,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": str(resp.url),
+                },
+                allow_redirects=True,
+                timeout=15,
+            )
+            print(f"[DEBUG] Challenge POST: {resp.status_code}, url={str(resp.url)[:100]}")
+
+            li_at = sess.cookies.get("li_at", "")
+            if li_at:
+                print("[DEBUG] Challenge cleared on POST — li_at issued!")
+                return True
+
+            print(f"[DEBUG] Challenge not cleared. Body: {resp.text[:300]!r}")
+            return False
+
+        except Exception as exc:
+            print(f"[DEBUG] Challenge follow error: {type(exc).__name__}: {exc}")
             return False
 
     def relogin(self) -> bool:

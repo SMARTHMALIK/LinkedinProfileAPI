@@ -849,48 +849,98 @@ def _check_api_connectivity() -> dict | None:
     return None
 
 
+def _dash_profile(public_id: str) -> tuple[dict, str]:
+    """
+    Fetch the base Profile entity from LinkedIn's Dash API.
+    Returns (profile_entity, profile_urn). The legacy /identity/profiles/{id}
+    and /profileView endpoints now return 410 Gone — this is their replacement.
+    """
+    data = _get(
+        "/identity/dash/profiles",
+        public_id,
+        params={"q": "memberIdentity", "memberIdentity": public_id},
+    )
+    if not data:
+        return {}, ""
+
+    profile = next(
+        (o for o in data.get("included", []) if o.get("$type", "").endswith(".Profile")),
+        None,
+    )
+    if not profile:
+        return {}, ""
+
+    urn = profile.get("entityUrn", "")
+    print(f"[DEBUG] Dash profile found: {profile.get('firstName')} {profile.get('lastName')} urn={urn[-24:]}")
+    return profile, urn
+
+
+def _dash_section(section: str, urn: str, public_id: str, type_suffix: str) -> list:
+    """
+    Fetch one profile section (positions, educations, skills, ...) from the Dash API.
+    `type_suffix` filters the normalized `included` list to the entity we want.
+    """
+    if not urn:
+        return []
+    import urllib.parse
+    data = _get(
+        f"/identity/dash/{section}",
+        public_id,
+        params={"q": "viewee", "profileUrn": urn},
+    )
+    if not data:
+        return []
+    items = [
+        o for o in data.get("included", [])
+        if o.get("$type", "").endswith(type_suffix)
+    ]
+    print(f"[DEBUG] {section}: {len(items)} items")
+    return items
+
+
 def fetch_all(url_or_id: str) -> dict:
     public_id = extract_public_id(url_or_id)
 
-    # ── 1. Public HTML (unauthenticated) — always attempt for images + fallback ──
-    try:
-        public_html, ip_blocked = _get_public_html(public_id)
-    except Exception as exc:
-        print(f"[DEBUG] public HTML fetch error: {exc}")
-        public_html, ip_blocked = "", False
-
-    html_data: dict = {}
-    html_data.update(_extract_from_html(public_html))
-    for k, v in _extract_from_json_ld(public_html).items():
-        if v and k not in html_data:
-            html_data[k] = v
-    print(f"[DEBUG] html_data keys: {list(html_data.keys())}")
-
-    # ── 2. Voyager API (authenticated) — full experience/education/skills/languages ──
-    classic = None
-    profile_view = None
+    # ── 1. Voyager Dash API (authenticated) — the primary data source ──
+    profile, urn = {}, ""
+    positions = educations = skills = certifications = languages = []
 
     if session.is_authenticated():
-        print(f"[DEBUG] Authenticated — fetching via Voyager API")
-        classic = _get_classic_profile(public_id)
-        if classic is None:
-            # 401/redirect means session expired — try re-login once
-            if session.relogin():
-                classic = _get_classic_profile(public_id)
-        if classic:
-            profile_view = _get_profile_view(public_id)
-            print(f"[DEBUG] profileView obtained: {bool(profile_view)}")
+        print("[DEBUG] Authenticated — fetching via Voyager Dash API")
+        profile, urn = _dash_profile(public_id)
+        if not profile and session.relogin():
+            profile, urn = _dash_profile(public_id)
+
+        if urn:
+            positions      = _dash_section("profilePositions",      urn, public_id, ".Position")
+            educations     = _dash_section("profileEducations",     urn, public_id, ".Education")
+            skills         = _dash_section("profileSkills",         urn, public_id, ".Skill")
+            certifications = _dash_section("profileCertifications", urn, public_id, ".Certification")
+            languages      = _dash_section("profileLanguages",      urn, public_id, ".Language")
     else:
-        print(f"[DEBUG] Not authenticated — Voyager API skipped")
+        print("[DEBUG] Not authenticated — Voyager API skipped")
 
-    # ── 3. Determine if we have enough data to return ──
-    has_data = any([
-        classic,
-        html_data.get("name"),
-        html_data.get("headline"),
-        html_data.get("profilePicture"),
-    ])
+    # ── 2. Public HTML — fallback when unauthenticated, and for the location string ──
+    html_data: dict = {}
+    ip_blocked = False
+    need_html = not profile or not profile.get("headline")
+    if need_html:
+        try:
+            public_html, ip_blocked = _get_public_html(public_id)
+        except Exception as exc:
+            print(f"[DEBUG] public HTML fetch error: {exc}")
+            public_html, ip_blocked = "", False
 
+        html_data.update(_extract_from_html(public_html))
+        for k, v in _extract_from_json_ld(public_html).items():
+            if v and k not in html_data:
+                html_data[k] = v
+        print(f"[DEBUG] html_data keys: {list(html_data.keys())}")
+
+    # ── 3. Bail out only if we got nothing from either source ──
+    has_data = bool(profile) or any(
+        html_data.get(k) for k in ("name", "headline", "profilePicture")
+    )
     if not has_data:
         if ip_blocked:
             raise RuntimeError(
@@ -903,9 +953,10 @@ def fetch_all(url_or_id: str) -> dict:
     return {
         "publicIdentifier": public_id,
         "htmlData": html_data,
-        "classicProfile": classic or {},
-        "profileView": profile_view or {},
-        "dashProfile": {},
-        "skills": {},
-        "languages": {},
+        "dashProfile": profile,
+        "positions": positions,
+        "educations": educations,
+        "skills": skills,
+        "certifications": certifications,
+        "languages": languages,
     }
