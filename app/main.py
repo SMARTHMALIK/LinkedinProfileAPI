@@ -48,6 +48,27 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/auth/status", tags=["Meta"], summary="Check whether the backend LinkedIn session is active")
+def auth_status():
+    return {
+        "authenticated": session.is_authenticated(),
+        "mode": "voyager-api" if session.is_authenticated() else "public-html-only",
+    }
+
+
+@app.post("/auth/retry", tags=["Meta"], summary="Re-attempt the LinkedIn login without redeploying")
+def auth_retry():
+    """
+    Useful after approving a 'new sign-in' notification in LinkedIn: this re-runs
+    the login immediately instead of waiting for a redeploy.
+    """
+    ok = session.relogin()
+    return {
+        "login_succeeded": ok,
+        "authenticated": session.is_authenticated(),
+    }
+
+
 @app.get(
     "/profile",
     response_model=ProfileResponse,

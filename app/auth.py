@@ -176,7 +176,10 @@ class LinkedInSession:
 
     def get_voyager_headers(self) -> dict:
         sess = self.get_session()
-        jsessionid = sess.cookies.get("JSESSIONID", "")
+        # LinkedIn stores JSESSIONID quoted ("ajax:123..."). The csrf-token header
+        # must carry the value WITHOUT the surrounding quotes but WITH the ajax:
+        # prefix — sending the quotes causes "CSRF check failed" 403s.
+        jsessionid = sess.cookies.get("JSESSIONID", "").strip('"')
         return {
             "csrf-token": jsessionid,
             "x-restli-protocol-version": "2.0.0",
