@@ -1,8 +1,10 @@
 # LinkedIn Profile API
 
-A FastAPI server that accepts a LinkedIn profile URL and returns structured JSON profile data using pure HTTP calls to LinkedIn's internal endpoints — no browser, no Selenium.
+A FastAPI server that accepts a LinkedIn profile URL and returns structured JSON profile data using pure HTTP calls to LinkedIn's internal endpoints
 
 ---
+## Deployed Link:
+https://linkedinprofileapi-xtu8.onrender.com/
 
 ## Setup Instructions
 
@@ -34,7 +36,6 @@ Fill in `.env`:
 ```
 LINKEDIN_LI_AT=your_li_at_value_here
 LINKEDIN_JSESSIONID=ajax:your_jsessionid_here
-LINKEDIN_GRAPHQL_QUERY_ID=voyagerIdentityDashProfiles.b5c27c04968c409fc0ed3546575b9b7a
 ```
 
 ### 4. Run
@@ -141,7 +142,6 @@ A logged-in page visit using the `li_at` session cookie. Even though LinkedIn's 
 LinkedIn's internal REST API at `/voyager/api/` — the same API the LinkedIn web app uses. Called with `li_at` + `JSESSIONID` cookies and the `csrf-token` header. Used for:
 - `/voyager/api/me` — verifies session health
 - `/voyager/api/typeahead/hitsV2` — fallback for name and headline via search
-- `/voyager/api/graphql` — profile version stub for URN confirmation
 
 **Session management:**
 The `li_at` cookie is a long-lived LinkedIn session token. `JSESSIONID` doubles as the CSRF token and must be passed as both a cookie and `csrf-token` header (including the `ajax:` prefix). The server warms up the session at startup by visiting LinkedIn's feed page.
@@ -155,4 +155,4 @@ The `li_at` cookie is a long-lived LinkedIn session token. `JSESSIONID` doubles 
 - **Private profiles** — Only public LinkedIn profiles are supported. Profiles set to private return no data.
 - **Experience and education detail** — When public HTML is the only data source, experience entries contain company names only (no job titles or dates) and education entries contain school names only (no degree or field of study). This is a limitation of what LinkedIn embeds in its JSON-LD schema.
 - **Skills, certifications, languages** — These sections are not available in LinkedIn's public HTML. They require a working authenticated Voyager API response, which depends on LinkedIn's internal API stability.
-- **LinkedIn API changes** — LinkedIn's internal Voyager API endpoints and GraphQL query IDs change with each deployment. Classic REST endpoints (`/voyager/api/identity/profiles/`) were removed in 2025 (HTTP 410). The public HTML approach is the most stable fallback as it is driven by LinkedIn's SEO requirements.
+- **LinkedIn API changes** — LinkedIn's internal Voyager API endpoints . Classic REST endpoints (`/voyager/api/identity/profiles/`) were removed in 2025 (HTTP 410). The public HTML approach is the most stable fallback as it is driven by LinkedIn's SEO requirements.
