@@ -56,11 +56,20 @@ def _get(path: str, public_id: str = "", params: dict = None) -> dict | None:
     try:
         resp = sess.get(url, headers=headers, params=params, timeout=15)
     except _requests.exceptions.TooManyRedirects:
-        print(f"[DEBUG] GET {path} → redirect loop (session likely expired)")
-        return None
+        # LinkedIn redirects API calls to the login page when it rejects the
+        # session — usually throttling after a burst of requests. This is NOT
+        # "profile not found", so it must not be reported as a 404.
+        print(f"[DEBUG] GET {path} → redirected to login (session rejected)")
+        raise RuntimeError(
+            "LinkedIn rejected the session for this request. This usually means "
+            "the account is being throttled after too many requests in a short "
+            "window — wait a few minutes and retry. If it persists, regenerate "
+            "LINKEDIN_LI_AT with tools/get_li_at.py."
+        )
 
     print(f"[DEBUG] GET {path} → {resp.status_code}")
 
+    # Genuine absence — the profile or section does not exist / is not visible.
     if resp.status_code in (404, 410):
         return None
 
@@ -115,11 +124,17 @@ def _dash_section(section: str, urn: str, public_id: str, type_suffix: str) -> l
     """
     if not urn:
         return []
-    data = _get(
-        f"/identity/dash/{section}",
-        public_id,
-        params={"q": "viewee", "profileUrn": urn},
-    )
+    try:
+        data = _get(
+            f"/identity/dash/{section}",
+            public_id,
+            params={"q": "viewee", "profileUrn": urn},
+        )
+    except RuntimeError as exc:
+        # A throttled section shouldn't discard the profile we already have —
+        # return what we can and leave this section empty.
+        print(f"[DEBUG] {section} unavailable: {exc}")
+        return []
     if not data:
         return []
     items = [
@@ -446,11 +461,13 @@ def fetch_all(url_or_id: str) -> dict:
     profile, urn = {}, ""
     positions = educations = skills = certifications = languages = []
 
-    if session.is_authenticated():
+    authenticated = session.is_authenticated()
+    if authenticated:
         print("[DEBUG] Authenticated — using Voyager Dash API")
+        # No re-login attempt here: an empty result means the profile does not
+        # exist or is not visible, not that the session broke. _get() already
+        # re-authenticates on a genuine 401.
         profile, urn = _dash_profile(public_id)
-        if not profile and session.relogin():
-            profile, urn = _dash_profile(public_id)
 
         if urn:
             positions      = _dash_section("profilePositions",      urn, public_id, ".Position")
@@ -484,7 +501,7 @@ def fetch_all(url_or_id: str) -> dict:
         # An authenticated Dash lookup that comes back empty is a definitive
         # "no such profile" — don't let the blocked HTML fallback mask that as
         # an IP-block error, or every mistyped URL would report 429.
-        if ip_blocked and not session.is_authenticated():
+        if ip_blocked and not authenticated:
             raise RuntimeError(
                 "LinkedIn returned HTTP 999 — this server's IP is blocked by LinkedIn. "
                 "Provide LINKEDIN_LI_AT (generate it with tools/get_li_at.py) so the "

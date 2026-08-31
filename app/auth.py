@@ -215,12 +215,19 @@ class LinkedInSession:
             return False
 
     def relogin(self) -> bool:
-        """Re-authenticate when the session expires. Returns True if successful."""
+        """
+        Re-authenticate after the session expires. Returns True if successful.
+
+        The existing cookies are restored if the new login fails, so a rejected
+        re-login (LinkedIn challenges logins from datacenter IPs) cannot destroy
+        a session that was still working.
+        """
         email = os.getenv("LINKEDIN_EMAIL")
         password = os.getenv("LINKEDIN_PASSWORD")
         if not (email and password):
             return False
-        print("[DEBUG] Session expired — attempting re-login with credentials")
+
+        print("[DEBUG] Attempting re-login with credentials")
         sess = self._session
         if sess is None:
             sess = requests.Session()
@@ -228,8 +235,20 @@ class LinkedInSession:
             sess.verify = False
             sess.max_redirects = 5
             self._session = sess
+
+        saved = list(sess.cookies)
         sess.cookies.clear()
-        return self._login_with_credentials(sess, email, password)
+
+        if self._login_with_credentials(sess, email, password):
+            return True
+
+        # Roll back to the previous session rather than leaving it unauthenticated.
+        sess.cookies.clear()
+        for c in saved:
+            sess.cookies.set_cookie(c)
+        if self.is_authenticated():
+            print("[DEBUG] Re-login failed — kept the existing session")
+        return False
 
     def is_authenticated(self) -> bool:
         return bool(self._session and self._session.cookies.get("li_at"))
