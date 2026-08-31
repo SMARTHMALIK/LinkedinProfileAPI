@@ -122,8 +122,10 @@ GET /profile?url=https://www.linkedin.com/in/satyanadella/
 | Status | Meaning |
 |--------|---------|
 | `400` | Invalid or unparseable LinkedIn URL |
-| `404` | Profile not found or is private |
-| `429` | LinkedIn blocked this server's IP (HTTP 999) and no session was available |
+| `404` | Profile does not exist, or is not visible to the authenticated account |
+| `429` | LinkedIn is throttling the account, or blocked the server's IP (HTTP 999) with no session available. The `detail` field distinguishes the two. Retry after a few minutes. |
+
+A `429` is not fatal — the session is preserved and requests succeed again once LinkedIn releases the throttle. See [Rate limiting](#known-limitations).
 
 ### `GET /auth/status`
 
@@ -210,7 +212,16 @@ Requests use `curl_cffi` with a Chrome TLS fingerprint, since LinkedIn returns H
 
 - **LinkedIn changes these endpoints without notice.** They are internal APIs with no stability guarantee — the `410 Gone` on the classic REST endpoints is exactly this happening. Endpoint paths may need revisiting if calls begin failing.
 
-- **Rate limiting.** Sustained high-volume querying from a single session will get throttled. This service performs six API calls per profile request and does no caching.
+- **Rate limiting is the practical constraint.** Each `/profile` request costs up to **six** Voyager calls (one to resolve the profile, five for the sections) and nothing is cached, so request volume against LinkedIn is six times what it looks like. LinkedIn throttles per-account as well as per-IP, and it does so by **redirecting API calls to the login page** rather than returning `429`. Once throttled, calls keep failing for anywhere from a few minutes to a few hours before the account is released.
+
+  Two consequences worth knowing:
+
+  - Rapid successive requests — a loop, or hitting Refresh repeatedly — will trigger it. This is expected behaviour, not a fault in the service; give it a few minutes.
+  - While throttled, **`/uas/authenticate` is challenged too**, so `tools/get_li_at.py` cannot mint a replacement session until the throttle clears. Generate a session *before* heavy testing rather than during it.
+
+  The service reports throttling as `429` with an explanatory message and distinguishes it from a genuine `404`. A throttled *section* call degrades to an empty list rather than failing the whole request, so a partially-throttled fetch still returns the base profile.
+
+  For production use this wants a cache in front of it and a request queue; neither is implemented here.
 
 ---
 
